@@ -1,0 +1,14 @@
+{
+  "market": "crypto",
+  "symbols": ["BTC-USD", "ETH-USD", "SOL-USD"],
+  "lookback_days": 450,
+  "poll_seconds": 300,
+  "max_symbol_weight": 0.3,
+  "cash_buffer_pct": 0.1,
+  "min_order_notional": 25.0,
+  "allow_short": false,
+  "dry_run": true,
+  "initial_cash": 2000.0,
+  "fee_rate_bp": 26.0,
+  "output_dir": "artifacts/live"
+}

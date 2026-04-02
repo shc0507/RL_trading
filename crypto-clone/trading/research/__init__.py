@@ -1,0 +1,1 @@
+"""Research-oriented strategy modules."""
