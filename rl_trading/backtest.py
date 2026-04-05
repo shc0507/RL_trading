@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import pandas as pd
 
@@ -72,11 +73,31 @@ class Backtester:
             .reset_index(drop=True)
         )
 
+        portfolio_scale_factor: float | None = None
+        pre_target_annual_vol: float | None = None
+        if self.env_config.reward_mode == "zhang" and not daily_returns.empty:
+            pre_target_annual_vol = float(
+                daily_returns["portfolio_return"].std(ddof=0) * math.sqrt(252.0)
+            )
+            if pre_target_annual_vol > 0:
+                portfolio_scale_factor = float(self.env_config.vol_target / pre_target_annual_vol)
+                daily_returns["portfolio_return_unscaled"] = daily_returns["portfolio_return"]
+                daily_returns["avg_turnover_unscaled"] = daily_returns["avg_turnover"]
+                daily_returns["total_cost_unscaled"] = daily_returns["total_cost"]
+                daily_returns["portfolio_return"] = daily_returns["portfolio_return"] * portfolio_scale_factor
+                daily_returns["avg_turnover"] = daily_returns["avg_turnover"] * abs(portfolio_scale_factor)
+                daily_returns["total_cost"] = daily_returns["total_cost"] * abs(portfolio_scale_factor)
+                daily_returns["portfolio_scale_factor"] = portfolio_scale_factor
+
         portfolio_metrics = compute_performance_metrics(
             daily_returns["portfolio_return"],
             turnover=daily_returns["avg_turnover"],
             total_cost=float(daily_returns["total_cost"].sum()),
         )
+        if portfolio_scale_factor is not None and pre_target_annual_vol is not None:
+            portfolio_metrics["portfolio_scale_factor"] = float(portfolio_scale_factor)
+            portfolio_metrics["pre_target_annualized_volatility"] = float(pre_target_annual_vol)
+            portfolio_metrics["portfolio_vol_target"] = float(self.env_config.vol_target)
         symbol_metrics = pd.DataFrame(symbol_metric_rows).sort_values("symbol").reset_index(drop=True)
 
         return EvalReport(

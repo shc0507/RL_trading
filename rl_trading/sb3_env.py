@@ -164,6 +164,7 @@ def compare_sb3_policy(
     name: str,
     split: str,
     action_mode: Literal["continuous", "discrete"],
+    reward_mode: Literal["raw", "zhang"] = "raw",
     symbols: list[str] | None = None,
     splits: dict[str, tuple[str, str]] | None = None,
     feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS,
@@ -171,7 +172,7 @@ def compare_sb3_policy(
 ) -> tuple[pd.DataFrame, dict[str, EvalReport]]:
     env_config = EnvironmentConfig(
         action_mode=action_mode,
-        reward_mode="zhang",
+        reward_mode=reward_mode,
         feature_columns=feature_columns,
     )
     backtester = Backtester(feature_frame=feature_frame, env_config=env_config, splits=splits)
