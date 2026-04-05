@@ -5,8 +5,11 @@ description = "Week-1 data pipeline and simulated trading environment for DRL tr
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "gymnasium>=1.2",
   "numpy>=2.0",
   "pandas>=2.2",
+  "stable-baselines3>=2.7",
+  "torch>=2.2",
   "yfinance>=0.2",
 ]
 
