@@ -23,7 +23,7 @@ class SB3TrainTests(unittest.TestCase):
     def test_run_sb3_experiment_smoke_dqn(self) -> None:
         experiment = run_sb3_experiment(
             feature_frame=self.features,
-            config=SB3TrainConfig(algo="dqn", total_timesteps=64),
+            config=SB3TrainConfig(algo="dqn", total_timesteps=64, cost_rate_bp=5.0),
             train_split="train",
             eval_split="test",
             symbols=["AAA"],
@@ -31,6 +31,7 @@ class SB3TrainTests(unittest.TestCase):
         )
         self.assertIn("sb3_dqn", set(experiment["comparison"]["policy"]))
         self.assertIn("annualized_return", experiment["comparison"].columns)
+        self.assertEqual(experiment["cost_rate_bp"], 5.0)
 
 
 if __name__ == "__main__":

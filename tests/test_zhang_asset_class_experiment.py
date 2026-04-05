@@ -8,6 +8,7 @@ from rl_trading.zhang_asset_class_experiment import (
     ASSET_CLASS_SPECS,
     build_window_splits,
     eligible_symbols_for_windows,
+    format_cost_tag,
     resolve_training_budget,
     zhang_splits,
     zhang_windows,
@@ -25,6 +26,10 @@ class ZhangAssetClassExperimentTests(unittest.TestCase):
         total_timesteps, eval_frequency = resolve_training_budget(base_training_steps=250, total_timesteps=None)
         self.assertEqual(total_timesteps, 5000)
         self.assertEqual(eval_frequency, 250)
+
+    def test_format_cost_tag(self) -> None:
+        self.assertEqual(format_cost_tag(5.0), "5bp")
+        self.assertEqual(format_cost_tag(2.5), "2p5bp")
 
     def test_eligible_symbols_for_windows_filters_incomplete_symbols(self) -> None:
         dates = pd.date_range("2007-03-30", periods=5000, freq="B")

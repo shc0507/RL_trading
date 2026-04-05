@@ -23,6 +23,7 @@ class SB3TrainConfig:
     learning_rate: float = 1e-4
     gamma: float = 0.3
     seed: int = 7
+    cost_rate_bp: float = 20.0
     train_reward_mode: Literal["raw", "zhang"] = "zhang"
     eval_reward_mode: Literal["raw", "zhang"] = "raw"
 
@@ -92,6 +93,7 @@ def run_sb3_experiment(
         symbols=symbols,
         action_mode=action_mode,
         reward_mode=config.train_reward_mode,
+        cost_rate_bp=config.cost_rate_bp,
         splits=splits,
         shuffle_symbols=True,
         seed=config.seed,
@@ -106,6 +108,7 @@ def run_sb3_experiment(
             symbols=symbols,
             action_mode=action_mode,
             reward_mode=config.train_reward_mode,
+            cost_rate_bp=config.cost_rate_bp,
             splits=splits,
             shuffle_symbols=True,
             seed=config.seed,
@@ -142,6 +145,7 @@ def run_sb3_experiment(
         split=eval_split,
         action_mode=action_mode,
         reward_mode=config.eval_reward_mode,
+        cost_rate_bp=config.cost_rate_bp,
         symbols=symbols,
         splits=splits,
     )
@@ -153,6 +157,7 @@ def run_sb3_experiment(
         "total_timesteps": config.total_timesteps,
         "train_reward_mode": config.train_reward_mode,
         "eval_reward_mode": config.eval_reward_mode,
+        "cost_rate_bp": config.cost_rate_bp,
         "validation_split": validation_split,
     }
 
@@ -176,13 +181,14 @@ def main() -> None:
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--eval-split", default="test")
     parser.add_argument("--total-timesteps", type=int, default=20_000)
+    parser.add_argument("--cost-rate-bp", type=float, default=20.0)
     parser.add_argument("--comparison-path", default=None)
     args = parser.parse_args()
 
     feature_frame = pd.read_csv(args.features_path)
     experiment = run_sb3_experiment(
         feature_frame=feature_frame,
-        config=SB3TrainConfig(algo=args.algo, total_timesteps=args.total_timesteps),
+        config=SB3TrainConfig(algo=args.algo, total_timesteps=args.total_timesteps, cost_rate_bp=args.cost_rate_bp),
         train_split=args.train_split,
         eval_split=args.eval_split,
     )
@@ -190,6 +196,7 @@ def main() -> None:
     saved_comparison = save_experiment_outputs(experiment, comparison_path)
     print(f"algo={args.algo}")
     print(f"total_timesteps={args.total_timesteps}")
+    print(f"cost_rate_bp={experiment['cost_rate_bp']}")
     print(f"train_reward_mode={experiment['train_reward_mode']}")
     print(f"eval_reward_mode={experiment['eval_reward_mode']}")
     print("comparison:")

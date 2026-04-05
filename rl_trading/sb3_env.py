@@ -73,6 +73,7 @@ class SB3TradingEnv(gym.Env):
         symbols: list[str] | None = None,
         action_mode: Literal["continuous", "discrete"] = "discrete",
         reward_mode: Literal["raw", "zhang"] = "zhang",
+        cost_rate_bp: float = 20.0,
         splits: dict[str, tuple[str, str]] | None = None,
         feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS,
         include_position: bool = True,
@@ -86,6 +87,7 @@ class SB3TradingEnv(gym.Env):
         self.symbols = symbols or sorted(self.feature_frame["symbol"].unique().tolist())
         self.action_mode = action_mode
         self.reward_mode = reward_mode
+        self.cost_rate_bp = cost_rate_bp
         self.splits = splits or DEFAULT_SPLITS
         self.feature_columns = feature_columns
         self.include_position = include_position
@@ -98,6 +100,7 @@ class SB3TradingEnv(gym.Env):
             config=EnvironmentConfig(
                 action_mode=action_mode,
                 reward_mode=reward_mode,
+                cost_rate_bp=cost_rate_bp,
                 feature_columns=feature_columns,
             ),
             splits=self.splits,
@@ -165,6 +168,7 @@ def compare_sb3_policy(
     split: str,
     action_mode: Literal["continuous", "discrete"],
     reward_mode: Literal["raw", "zhang"] = "raw",
+    cost_rate_bp: float = 20.0,
     symbols: list[str] | None = None,
     splits: dict[str, tuple[str, str]] | None = None,
     feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS,
@@ -173,6 +177,7 @@ def compare_sb3_policy(
     env_config = EnvironmentConfig(
         action_mode=action_mode,
         reward_mode=reward_mode,
+        cost_rate_bp=cost_rate_bp,
         feature_columns=feature_columns,
     )
     backtester = Backtester(feature_frame=feature_frame, env_config=env_config, splits=splits)

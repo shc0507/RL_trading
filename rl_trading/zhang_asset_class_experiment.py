@@ -20,9 +20,10 @@ from .metrics import compute_performance_metrics
 from .sb3_train import SB3TrainConfig, run_sb3_experiment, save_experiment_outputs
 
 
-DEFAULT_FETCH_START = "2007-03-30"
+DEFAULT_FETCH_START = "2005-01-01"
 DEFAULT_FETCH_END = "2019-12-31"
 DEFAULT_EPOCH_MULTIPLIER = 20
+DEFAULT_COST_RATE_BP = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +158,13 @@ def resolve_training_budget(
     return int(base_training_steps * epoch_multiplier), int(base_training_steps)
 
 
+def format_cost_tag(cost_rate_bp: float) -> str:
+    if float(cost_rate_bp).is_integer():
+        return f"{int(cost_rate_bp)}bp"
+    normalized = str(cost_rate_bp).replace(".", "p")
+    return f"{normalized}bp"
+
+
 def build_asset_class_artifacts(
     instrument_map: dict[str, dict[str, str]],
     output_dir: str | Path,
@@ -278,11 +286,16 @@ def run_zhang_asset_class_experiment(
     algo: str,
     total_timesteps: int | None,
     epoch_multiplier: int = DEFAULT_EPOCH_MULTIPLIER,
+    cost_rate_bp: float = DEFAULT_COST_RATE_BP,
     output_dir: str | Path | None = None,
     symbols: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     spec = ASSET_CLASS_SPECS[asset_class]
-    output_root = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR / spec.output_subdir
+    output_root = (
+        Path(output_dir)
+        if output_dir is not None
+        else DEFAULT_OUTPUT_DIR / f"{spec.output_subdir}_{format_cost_tag(cost_rate_bp)}"
+    )
     requested_symbols = list(symbols) if symbols is not None else list(spec.symbols)
     artifacts = build_asset_class_artifacts(spec.instrument_map, output_root, symbols=requested_symbols)
     features = artifacts["features"] if isinstance(artifacts, dict) else artifacts.features
@@ -320,6 +333,7 @@ def run_zhang_asset_class_experiment(
         config = SB3TrainConfig(
             algo=algo,
             total_timesteps=int(resolved_timesteps),
+            cost_rate_bp=float(cost_rate_bp),
             train_reward_mode="zhang",
             eval_reward_mode="raw",
         )
@@ -378,6 +392,7 @@ def run_zhang_asset_class_experiment(
                 "windows": windows,
                 "train_reward_mode": config.train_reward_mode,
                 "eval_reward_mode": config.eval_reward_mode,
+                "cost_rate_bp": cost_rate_bp,
                 "validation_fraction": 0.1,
                 "early_stopping_patience_evals": 20,
                 "epoch_multiplier": epoch_multiplier,
@@ -419,6 +434,7 @@ def build_arg_parser(default_asset_class: str | None = None) -> argparse.Argumen
     parser.add_argument("--algo", choices=("dqn", "a2c", "ppo"), default="dqn")
     parser.add_argument("--total-timesteps", type=int, default=None)
     parser.add_argument("--epoch-multiplier", type=int, default=DEFAULT_EPOCH_MULTIPLIER)
+    parser.add_argument("--cost-rate-bp", type=float, default=DEFAULT_COST_RATE_BP)
     parser.add_argument("--output-dir", default=None)
     return parser
 
@@ -434,12 +450,14 @@ def run_cli(default_asset_class: str | None = None) -> None:
         algo=args.algo,
         total_timesteps=args.total_timesteps,
         epoch_multiplier=args.epoch_multiplier,
+        cost_rate_bp=args.cost_rate_bp,
         output_dir=args.output_dir,
     )
     print(f"asset_class={args.asset_class}")
     print(f"algo={args.algo}")
     print(f"requested_total_timesteps={args.total_timesteps}")
     print(f"epoch_multiplier={args.epoch_multiplier}")
+    print(f"cost_rate_bp={args.cost_rate_bp}")
     print(f"requested_symbols={result['requested_symbols']}")
     print(f"eligible_symbols={result['eligible_symbols']}")
     print(f"dropped_symbols={result['dropped_symbols']}")
