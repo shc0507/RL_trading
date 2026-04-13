@@ -7,7 +7,10 @@ from rl_trading.env import EnvironmentConfig
 from rl_trading.features import FeatureBuilder
 from rl_trading.policies import LongOnlyPolicy, MACDPolicy, Sign12MPolicy
 
-from test_data_pipeline import make_bar_frame
+try:
+    from test_data_pipeline import make_bar_frame
+except ModuleNotFoundError:  # pragma: no cover - supports module-style unittest invocation
+    from tests.test_data_pipeline import make_bar_frame
 
 
 class BacktesterTests(unittest.TestCase):
