@@ -1,158 +1,181 @@
-"""Single-symbol trading environment."""
+"""Single-asset trading environment per Zhang et al. (2019)."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import pandas as pd
 
-from .config import ANNUALIZATION_FACTOR, DEFAULT_COST_RATE_BP, DEFAULT_FEATURE_COLUMNS, DEFAULT_SPLITS, DEFAULT_VOL_TARGET
+from rl_trading.config import (
+    DEFAULT_COST_RATE_BP,
+    DEFAULT_VOL_TARGET,
+    OBSERVATION_WINDOW,
+    TRAIN_END,
+    TRAIN_START,
+    TEST_END,
+    TEST_START,
+    VAL_END,
+    VAL_START,
+)
+from rl_trading.features import FEATURE_COLS
+
+# ── Split date ranges ───────────────────────────────────────────────
+_SPLITS: dict[str, tuple[str, str]] = {
+    "train": (TRAIN_START, TRAIN_END),
+    "val": (VAL_START, VAL_END),
+    "test": (TEST_START, TEST_END),
+}
+
+# Discrete action → position mapping
+_ACTION_TO_POS = {0: -1.0, 1: 0.0, 2: 1.0}
 
 
-@dataclass(slots=True)
-class EnvironmentConfig:
-    action_mode: Literal["continuous", "discrete"] = "continuous"
-    reward_mode: Literal["raw", "zhang"] = "zhang"
+@dataclass
+class EnvConfig:
+    action_mode: str = "discrete"  # "discrete" or "continuous"
     cost_rate_bp: float = DEFAULT_COST_RATE_BP
     vol_target: float = DEFAULT_VOL_TARGET
-    feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS
+    seq_len: int = OBSERVATION_WINDOW  # for LSTM sequence input
 
 
 class TradingEnv:
-    """Close-to-close trading environment."""
+    """Single-asset trading environment with Zhang et al. reward."""
 
-    def __init__(
-        self,
-        feature_frame: pd.DataFrame,
-        config: EnvironmentConfig | None = None,
-        splits: dict[str, tuple[str, str]] | None = None,
-    ) -> None:
-        self.feature_frame = feature_frame.copy()
-        self.feature_frame["date"] = pd.to_datetime(self.feature_frame["date"])
-        self.config = config or EnvironmentConfig()
-        self.splits = splits or DEFAULT_SPLITS
-        self.episode_frame: pd.DataFrame | None = None
-        self.symbol: str | None = None
-        self.split: str | None = None
-        self.pointer = 0
-        self.position = 0.0
-        self.current_vol: float | None = None
+    def __init__(self, feature_frame: pd.DataFrame, cfg: EnvConfig | None = None):
+        """
+        Parameters
+        ----------
+        feature_frame : DataFrame output of FeatureBuilder.transform(), must contain
+            columns: date, symbol, close, ewm_vol, window_ready, and FEATURE_COLS.
+        cfg : environment configuration.
+        """
+        self.full_frame = feature_frame
+        self.cfg = cfg or EnvConfig()
+        self._bp = self.cfg.cost_rate_bp / 10_000
 
-    def reset(self, symbol: str, split: str) -> dict[str, object]:
-        if split not in self.splits:
-            raise KeyError(f"unknown split {split}")
-        start_date, end_date = self.splits[split]
-        frame = self.feature_frame.loc[self.feature_frame["symbol"] == symbol].copy()
-        if frame.empty:
-            raise ValueError(f"no feature rows found for symbol {symbol}")
+        # Episode state (set in reset)
+        self._data: pd.DataFrame | None = None
+        self._features: np.ndarray | None = None
+        self._prices: np.ndarray | None = None
+        self._ewm_vol: np.ndarray | None = None
+        self._dates: np.ndarray | None = None
+        self._t: int = 0
+        self._position: float = 0.0
+
+        # Episode history
+        self.history: dict[str, list] = {}
+
+    # ── Public API ──────────────────────────────────────────────────
+
+    def reset(self, symbol: str, split: str = "train") -> np.ndarray:
+        """Start a new episode for *symbol* in the given split.
+
+        Returns the first state vector (1D, length len(FEATURE_COLS)) or,
+        if cfg.seq_len > 1, a 2D array of shape (seq_len, n_features).
+        """
+        start, end = _SPLITS[split]
         mask = (
-            (frame["date"] >= pd.Timestamp(start_date))
-            & (frame["date"] <= pd.Timestamp(end_date))
-            & frame["window_ready"]
+            (self.full_frame["symbol"] == symbol)
+            & (self.full_frame["window_ready"])
+            & (self.full_frame["date"] >= start)
+            & (self.full_frame["date"] <= end)
         )
-        episode = frame.loc[mask].reset_index(drop=True)
-        if len(episode) < 2:
-            raise ValueError(f"not enough rows for symbol {symbol} in split {split}")
+        self._data = self.full_frame.loc[mask].sort_values("date").reset_index(drop=True)
+        if len(self._data) == 0:
+            raise ValueError(f"No data for {symbol} in split={split}")
 
-        self.episode_frame = episode
-        self.symbol = symbol
-        self.split = split
-        self.pointer = 0
-        self.position = 0.0
-        self.current_vol = None
-        return self._observation()
+        self._features = self._data[FEATURE_COLS].to_numpy(dtype=np.float32)
+        self._prices = self._data["adj_close"].to_numpy(dtype=np.float64)
+        self._ewm_vol = self._data["ewm_vol"].to_numpy(dtype=np.float64)
+        self._dates = self._data["date"].to_numpy()
 
-    def step(self, target_position: float) -> tuple[dict[str, object] | None, float, bool, dict[str, object]]:
-        if self.episode_frame is None:
-            raise RuntimeError("reset must be called before step")
-        if self.pointer >= len(self.episode_frame) - 1:
-            raise RuntimeError("environment is already done")
+        # Start at the earliest index that allows a full sequence
+        self._t = max(self.cfg.seq_len - 1, 0)
+        self._position = 0.0
 
-        action = self._normalize_action(target_position)
-        current = self.episode_frame.iloc[self.pointer]
-        next_row = self.episode_frame.iloc[self.pointer + 1]
-        cost_rate = self.config.cost_rate_bp / 10_000.0
-        price_now = float(current["adj_close"])
-        price_next = float(next_row["adj_close"])
-        pct_change = (price_next / price_now) - 1.0
+        self.history = {
+            "date": [],
+            "price": [],
+            "position": [],
+            "reward": [],
+            "daily_return": [],
+            "transaction_cost": [],
+        }
 
-        turnover = abs(action - self.position)
-        raw_pnl = action * (price_next - price_now) - (cost_rate * price_now * turnover)
-        raw_return = action * pct_change - (cost_rate * turnover)
-        raw_pre_cost_pnl = action * (price_next - price_now)
+        return self._get_state()
 
-        current_vol = max(float(current["ewm_vol_60"]), 1e-8)
-        daily_target_vol = self._daily_target_vol()
-        previous_scaled_position = 0.0 if self.current_vol is None else self.position * (daily_target_vol / self.current_vol)
-        scaled_action = action * (daily_target_vol / current_vol)
-        scaled_turnover = abs(scaled_action - previous_scaled_position)
-        zhang_reward = scaled_action * (price_next - price_now) - (cost_rate * price_now * scaled_turnover)
-        zhang_return = scaled_action * pct_change - (cost_rate * scaled_turnover)
-        trade_cost = cost_rate * price_now * scaled_turnover
-        pre_cost_trade_return = scaled_action * (price_next - price_now)
-        trade_return = pre_cost_trade_return - trade_cost
+    def step(self, action) -> tuple[np.ndarray | None, float, bool, dict]:
+        """Execute one step.
 
-        self.position = action
-        self.current_vol = current_vol
-        self.pointer += 1
-        done = self.pointer >= len(self.episode_frame) - 1
-        reward = raw_pnl if self.config.reward_mode == "raw" else zhang_reward
-        next_observation = None if done else self._observation()
+        Parameters
+        ----------
+        action : int (0/1/2) for discrete mode, float in [-1,1] for continuous.
 
+        Returns
+        -------
+        (next_state, reward, done, info)
+        """
+        position = self._decode_action(action)
+
+        # Current time index
+        t = self._t
+        # Daily return: r_t = price_{t+1}/price_t - 1
+        # We need the *next* price to compute the return earned by holding
+        # a position at time t, so the last actionable step is len-2.
+        if t >= len(self._prices) - 1:
+            return None, 0.0, True, {}
+
+        daily_ret = (self._prices[t + 1] / self._prices[t]) - 1.0
+
+        # Annualized vol at time t
+        ann_vol_t = self._ewm_vol[t] * math.sqrt(252)
+        # Guard against zero / nan vol
+        if ann_vol_t < 1e-8 or np.isnan(ann_vol_t):
+            ann_vol_t = 1e-8
+
+        vol_scale = self.cfg.vol_target / ann_vol_t
+
+        # Reward (Zhang eq. 4 simplified)
+        position_return = vol_scale * position * daily_ret
+        tc = self._bp * abs(vol_scale * position - vol_scale * self._position)
+        reward = position_return - tc
+
+        # Record history
         info = {
-            "date": pd.Timestamp(current["date"]),
-            "next_date": pd.Timestamp(next_row["date"]),
-            "symbol": self.symbol,
-            "split": self.split,
-            "action": action,
-            "turnover": turnover,
-            "scaled_position": scaled_action,
-            "scaled_turnover": scaled_turnover,
-            "raw_pre_cost_pnl": raw_pre_cost_pnl,
-            "raw_pnl": raw_pnl,
-            "raw_return": raw_return,
-            "raw_cost": cost_rate * price_now * turnover,
-            "raw_cost_return": cost_rate * turnover,
-            "zhang_reward": zhang_reward,
-            "zhang_return": zhang_return,
-            "trade_return": trade_return,
-            "pre_cost_trade_return": pre_cost_trade_return,
-            "trade_cost": trade_cost,
-            "zhang_cost": cost_rate * price_now * scaled_turnover,
-            "zhang_cost_return": cost_rate * scaled_turnover,
-            "price_now": price_now,
-            "price_next": price_next,
-            "pct_change": pct_change,
-        }
-        return next_observation, reward, done, info
-
-    def _observation(self) -> dict[str, object]:
-        if self.episode_frame is None:
-            raise RuntimeError("episode not initialized")
-        row = self.episode_frame.iloc[self.pointer]
-        position = float(self.position)
-        window_end = self.pointer + 1
-        window_start = max(0, window_end - int(row["window_size"]))
-        window = self.episode_frame.iloc[window_start:window_end]
-        feature_window = window.loc[:, self.config.feature_columns].to_numpy(dtype=float)
-        return {
-            "symbol": self.symbol,
-            "split": self.split,
-            "date": pd.Timestamp(row["date"]),
+            "date": self._dates[t],
+            "price": self._prices[t],
             "position": position,
-            "window": feature_window,
-            "features": {column: float(row[column]) for column in self.config.feature_columns},
-            "row": row.to_dict(),
+            "reward": reward,
+            "daily_return": daily_ret,
+            "transaction_cost": tc,
         }
+        for k, v in info.items():
+            self.history[k].append(v)
 
-    def _normalize_action(self, target_position: float) -> float:
-        action = float(np.clip(target_position, -1.0, 1.0))
-        if self.config.action_mode == "discrete":
-            discrete_choices = np.array([-1.0, 0.0, 1.0])
-            action = float(discrete_choices[np.abs(discrete_choices - action).argmin()])
-        return action
+        # Update state
+        self._position = position
+        self._t += 1
 
-    def _daily_target_vol(self) -> float:
-        return float(self.config.vol_target) / np.sqrt(ANNUALIZATION_FACTOR)
+        # Check done
+        if self._t >= len(self._prices) - 1:
+            return None, reward, True, info
+
+        return self._get_state(), reward, False, info
+
+    # ── Internals ───────────────────────────────────────────────────
+
+    def _get_state(self) -> np.ndarray:
+        """Return the current state observation."""
+        if self.cfg.seq_len <= 1:
+            return self._features[self._t]
+        # Sequence of past states for LSTM
+        start = self._t - self.cfg.seq_len + 1
+        return self._features[start : self._t + 1]  # (seq_len, n_features)
+
+    def _decode_action(self, action) -> float:
+        if self.cfg.action_mode == "discrete":
+            return _ACTION_TO_POS[int(action)]
+        # Continuous: clamp to [-1, 1]
+        return float(np.clip(action, -1.0, 1.0))

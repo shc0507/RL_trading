@@ -1,51 +1,78 @@
-"""Project-level defaults."""
+"""Project-wide defaults following Zhang et al. (2019)."""
 
 from __future__ import annotations
 
-from pathlib import Path
+# ── Feature windows ──────────────────────────────────────────────────
+OBSERVATION_WINDOW: int = 60
+VOLATILITY_SPAN: int = 60  # EWM vol lookback
+RSI_WINDOW: int = 30
+MACD_WINDOWS: tuple[tuple[int, int], ...] = ((8, 24), (16, 48), (32, 96))
+MACD_PRICE_STD_WINDOW: int = 63
+MACD_NORMALIZATION_WINDOW: int = 252
+RETURN_HORIZONS: tuple[int, ...] = (21, 42, 63, 252)
+ANNUALIZATION_FACTOR: int = 252
 
-DEFAULT_START_DATE = "2005-01-01"
-DEFAULT_END_DATE = "2025-12-31"
-DEFAULT_SPLITS = {
-    "train": ("2005-01-01", "2015-12-31"),
-    "val": ("2016-01-01", "2018-12-31"),
-    "test": ("2019-01-01", "2025-12-31"),
-}
+# ── Trading defaults ─────────────────────────────────────────────────
+DEFAULT_VOL_TARGET: float = 0.15
+DEFAULT_COST_RATE_BP: float = 2.0  # basis points
 
-DEFAULT_INSTRUMENTS = (
-    {"symbol": "SPY", "stooq_symbol": "spy.us", "asset_class": "equity_etf", "currency": "USD"},
-    {"symbol": "QQQ", "stooq_symbol": "qqq.us", "asset_class": "equity_etf", "currency": "USD"},
-    {"symbol": "IWM", "stooq_symbol": "iwm.us", "asset_class": "equity_etf", "currency": "USD"},
-    {"symbol": "DIA", "stooq_symbol": "dia.us", "asset_class": "equity_etf", "currency": "USD"},
-    {"symbol": "EFA", "stooq_symbol": "efa.us", "asset_class": "equity_etf", "currency": "USD"},
-    {"symbol": "EEM", "stooq_symbol": "eem.us", "asset_class": "equity_etf", "currency": "USD"},
-)
+# ── Train / val / test splits ────────────────────────────────────────
+TRAIN_START = "2005-01-01"
+TRAIN_END = "2015-12-31"
+VAL_START = "2016-01-01"
+VAL_END = "2018-12-31"
+TEST_START = "2019-01-01"
+TEST_END = "2025-12-31"
 
-DEFAULT_SYMBOLS = tuple(instrument["symbol"] for instrument in DEFAULT_INSTRUMENTS)
-DEFAULT_INSTRUMENT_MAP = {instrument["symbol"]: instrument for instrument in DEFAULT_INSTRUMENTS}
-
-OBSERVATION_WINDOW = 60
-VOLATILITY_SPAN = 60
-RSI_WINDOW = 30
-MACD_WINDOWS = ((8, 24), (16, 48), (32, 96))
-RETURN_HORIZONS = (21, 42, 63, 252)
-MACD_PRICE_STD_WINDOW = 63
-MACD_NORMALIZATION_WINDOW = 252
-ANNUALIZATION_FACTOR = 252
-DEFAULT_VOL_TARGET = 0.15
-DEFAULT_COST_RATE_BP = 20.0
-
-DEFAULT_FEATURE_COLUMNS = (
-    "norm_close",
-    "ret_21_vol",
-    "ret_42_vol",
-    "ret_63_vol",
-    "ret_252_vol",
-    "macd_8_24",
-    "macd_16_48",
-    "macd_32_96",
-    "macd_signal",
-    "rsi_30",
-)
-
-DEFAULT_OUTPUT_DIR = Path("artifacts")
+# ── Asset universe (~50 tickers) ─────────────────────────────────────
+UNIVERSE: list[dict[str, str]] = [
+    # Commodities (~25)
+    {"symbol": "GLD", "asset_class": "commodity"},
+    {"symbol": "SLV", "asset_class": "commodity"},
+    {"symbol": "USO", "asset_class": "commodity"},
+    {"symbol": "UNG", "asset_class": "commodity"},
+    {"symbol": "CORN", "asset_class": "commodity"},
+    {"symbol": "SOYB", "asset_class": "commodity"},
+    {"symbol": "WEAT", "asset_class": "commodity"},
+    {"symbol": "DBA", "asset_class": "commodity"},
+    {"symbol": "DBC", "asset_class": "commodity"},
+    {"symbol": "CPER", "asset_class": "commodity"},
+    {"symbol": "PALL", "asset_class": "commodity"},
+    {"symbol": "PPLT", "asset_class": "commodity"},
+    {"symbol": "JO", "asset_class": "commodity"},
+    {"symbol": "NIB", "asset_class": "commodity"},
+    {"symbol": "SGG", "asset_class": "commodity"},
+    {"symbol": "COW", "asset_class": "commodity"},
+    {"symbol": "UGA", "asset_class": "commodity"},
+    {"symbol": "BNO", "asset_class": "commodity"},
+    {"symbol": "PDBC", "asset_class": "commodity"},
+    {"symbol": "GSG", "asset_class": "commodity"},
+    # Equity Indexes (~11)
+    {"symbol": "SPY", "asset_class": "equity_index"},
+    {"symbol": "QQQ", "asset_class": "equity_index"},
+    {"symbol": "IWM", "asset_class": "equity_index"},
+    {"symbol": "DIA", "asset_class": "equity_index"},
+    {"symbol": "EFA", "asset_class": "equity_index"},
+    {"symbol": "EEM", "asset_class": "equity_index"},
+    {"symbol": "VGK", "asset_class": "equity_index"},
+    {"symbol": "EWJ", "asset_class": "equity_index"},
+    {"symbol": "FXI", "asset_class": "equity_index"},
+    {"symbol": "ACWI", "asset_class": "equity_index"},
+    {"symbol": "MDY", "asset_class": "equity_index"},
+    # Fixed Income (~5)
+    {"symbol": "TLT", "asset_class": "fixed_income"},
+    {"symbol": "IEF", "asset_class": "fixed_income"},
+    {"symbol": "SHY", "asset_class": "fixed_income"},
+    {"symbol": "LQD", "asset_class": "fixed_income"},
+    {"symbol": "AGG", "asset_class": "fixed_income"},
+    # Foreign Exchange (~9)
+    {"symbol": "FXE", "asset_class": "fx"},
+    {"symbol": "FXB", "asset_class": "fx"},
+    {"symbol": "FXC", "asset_class": "fx"},
+    {"symbol": "FXA", "asset_class": "fx"},
+    {"symbol": "FXY", "asset_class": "fx"},
+    {"symbol": "FXF", "asset_class": "fx"},
+    {"symbol": "UUP", "asset_class": "fx"},
+    {"symbol": "CYB", "asset_class": "fx"},
+    {"symbol": "CEW", "asset_class": "fx"},
+]

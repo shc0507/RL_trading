@@ -1,68 +1,126 @@
-"""End-to-end smoke runner for the week-1 pipeline."""
+"""Quick smoke test: download 3 symbols, compute features, plot."""
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
 
-import pandas as pd
-
-from .backtest import Backtester
-from .config import DEFAULT_END_DATE, DEFAULT_OUTPUT_DIR, DEFAULT_SPLITS, DEFAULT_START_DATE, DEFAULT_SYMBOLS
-from .data.pipeline import MarketDataPipeline
-from .data.sources import PublicDailySource
-from .env import EnvironmentConfig
-from .features import FeatureBuilder
-from .policies import LongOnlyPolicy, MACDPolicy, Sign12MPolicy
-
-
-def run_smoke(
-    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
-    symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
-    start_date: str = DEFAULT_START_DATE,
-    end_date: str = DEFAULT_END_DATE,
-) -> Path:
-    output_path = Path(output_dir)
-    pipeline = MarketDataPipeline(output_dir=output_path)
-    source = PublicDailySource()
-    feature_builder = FeatureBuilder()
-    artifacts = pipeline.build(
-        source=source,
-        feature_builder=feature_builder,
-        symbols=list(symbols),
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    env_config = EnvironmentConfig(action_mode="continuous", reward_mode="zhang")
-    backtester = Backtester(feature_frame=artifacts.features, env_config=env_config, splits=DEFAULT_SPLITS)
-    policies = [LongOnlyPolicy(), Sign12MPolicy(), MACDPolicy()]
-
-    summary_rows = []
-    smoke_dir = output_path / "smoke"
-    smoke_dir.mkdir(parents=True, exist_ok=True)
-    for split in DEFAULT_SPLITS:
-        for policy in policies:
-            report = backtester.run(policy=policy, split=split)
-            summary_rows.append({"policy": policy.name, "split": split, **report.portfolio_metrics})
-            report.daily_returns.to_csv(smoke_dir / f"{policy.name}_{split}_daily_returns.csv", index=False)
-            report.trade_log.to_csv(smoke_dir / f"{policy.name}_{split}_trades.csv", index=False)
-            report.symbol_metrics.to_csv(smoke_dir / f"{policy.name}_{split}_symbol_metrics.csv", index=False)
-
-    summary = pd.DataFrame(summary_rows).sort_values(["split", "policy"]).reset_index(drop=True)
-    summary_path = smoke_dir / "summary_metrics.csv"
-    summary.to_csv(summary_path, index=False)
-    return summary_path
+from rl_trading.data import fetch_bars
+from rl_trading.env import EnvConfig, TradingEnv
+from rl_trading.features import FEATURE_COLS, FeatureBuilder
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the week-1 DRL trading smoke test.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
-    args = parser.parse_args()
-    summary_path = run_smoke(output_dir=args.output_dir)
-    summary = pd.read_csv(summary_path)
-    print(summary.to_string(index=False))
+    symbols = ["SPY", "GLD", "TLT"]
+    bars = fetch_bars(symbols, start="2004-01-01", end="2025-12-31")
+    print(f"Bars shape: {bars.shape}")
+    print(f"Bars columns: {list(bars.columns)}")
+    print(bars.head())
+
+    fb = FeatureBuilder()
+    feat = fb.transform(bars)
+    print(f"\nFeature frame shape: {feat.shape}")
+    print(f"Feature columns: {list(feat.columns)}")
+
+    ready = feat[feat["window_ready"]]
+    print(f"\nRows with window_ready=True: {len(ready)} / {len(feat)}")
+    print(ready[["date", "symbol"] + FEATURE_COLS].head(10))
+
+    # Plot features for SPY
+    spy = ready[ready["symbol"] == "SPY"].set_index("date")
+    fig, axes = plt.subplots(len(FEATURE_COLS), 1, figsize=(12, 2.5 * len(FEATURE_COLS)), sharex=True)
+    for ax, col in zip(axes, FEATURE_COLS):
+        ax.plot(spy.index, spy[col], linewidth=0.7)
+        ax.set_ylabel(col, fontsize=8)
+        ax.grid(True, alpha=0.3)
+    axes[0].set_title("SPY – Zhang features")
+    fig.tight_layout()
+    fig.savefig("smoke_features.png", dpi=100)
+    print("\nPlot saved to smoke_features.png")
+
+    # ── Env smoke test ──────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("TradingEnv smoke test (SPY, train split)")
+    print("=" * 60)
+
+    cfg = EnvConfig(action_mode="discrete", seq_len=1)
+    env = TradingEnv(feat, cfg)
+
+    # Random-action rollout
+    rng = np.random.default_rng(42)
+    state = env.reset("SPY", "train")
+    total_reward = 0.0
+    trades = 0
+    prev_action = 1  # flat
+    for _ in range(100):
+        action = rng.integers(0, 3)
+        if action != prev_action:
+            trades += 1
+        prev_action = action
+        state, reward, done, info = env.step(action)
+        total_reward += reward
+        if done:
+            break
+    steps = len(env.history["reward"])
+    print(f"\n[Random policy]  steps={steps}  total_reward={total_reward:.6f}  "
+          f"trades={trades}  avg_reward={total_reward / max(steps, 1):.6f}")
+
+    # Long-only rollout
+    state = env.reset("SPY", "train")
+    total_reward = 0.0
+    for i in range(100):
+        state, reward, done, info = env.step(2)  # long
+        total_reward += reward
+        if done:
+            break
+    steps = len(env.history["reward"])
+    print(f"[Long-only]      steps={steps}  total_reward={total_reward:.6f}  "
+          f"trades=1  avg_reward={total_reward / max(steps, 1):.6f}")
+
+
+def smoke_rl() -> None:
+    """Quick RL smoke test: 2 epochs per agent on SPY."""
+    from rl_trading.agents import A2CAgent, DQNAgent, PGAgent
+    from rl_trading.trainer import Trainer, TrainerConfig
+
+    symbols = ["SPY"]
+    bars = fetch_bars(symbols, start="2004-01-01", end="2025-12-31")
+    fb = FeatureBuilder()
+    feat = fb.transform(bars)
+
+    tcfg = TrainerConfig(n_epochs=2, patience=5, checkpoint_dir="/tmp/rl_smoke_ckpt")
+
+    # DQN (discrete, seq_len=60 for LSTM)
+    print("\n" + "=" * 60)
+    print("DQN smoke test")
+    print("=" * 60)
+    env_d = TradingEnv(feat, EnvConfig(action_mode="discrete", seq_len=60))
+    dqn = DQNAgent(n_features=10)
+    trainer = Trainer(dqn, env_d, "SPY", tcfg)
+    result = trainer.train()
+    print(f"DQN result: {result}")
+
+    # PG (discrete, seq_len=60)
+    print("\n" + "=" * 60)
+    print("PG (REINFORCE) smoke test")
+    print("=" * 60)
+    env_p = TradingEnv(feat, EnvConfig(action_mode="discrete", seq_len=60))
+    pg = PGAgent(n_features=10)
+    trainer = Trainer(pg, env_p, "SPY", tcfg)
+    result = trainer.train()
+    print(f"PG result: {result}")
+
+    # A2C (continuous, seq_len=60)
+    print("\n" + "=" * 60)
+    print("A2C smoke test")
+    print("=" * 60)
+    env_a = TradingEnv(feat, EnvConfig(action_mode="continuous", seq_len=60))
+    a2c = A2CAgent(n_features=10)
+    trainer = Trainer(a2c, env_a, "SPY", tcfg)
+    result = trainer.train()
+    print(f"A2C result: {result}")
 
 
 if __name__ == "__main__":
     main()
+    smoke_rl()

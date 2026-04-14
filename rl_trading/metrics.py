@@ -1,59 +1,71 @@
-"""Performance metric helpers."""
+"""Performance metrics matching Zhang et al. (2019) Exhibit 2."""
 
 from __future__ import annotations
 
 import math
 
 import numpy as np
-import pandas as pd
-
-from .config import ANNUALIZATION_FACTOR
 
 
-def compute_performance_metrics(
-    returns: pd.Series,
-    turnover: pd.Series | None = None,
-    total_cost: float | None = None,
-    curve_mode: str = "additive",
-) -> dict[str, float]:
-    clean_returns = returns.fillna(0.0)
-    annual_return = float(clean_returns.mean() * ANNUALIZATION_FACTOR)
-    annual_vol = float(clean_returns.std(ddof=0) * math.sqrt(ANNUALIZATION_FACTOR))
-    downside = clean_returns[clean_returns < 0.0]
-    downside_deviation = float(downside.std(ddof=0) * math.sqrt(ANNUALIZATION_FACTOR)) if not downside.empty else 0.0
-    sharpe = annual_return / annual_vol if annual_vol > 0 else 0.0
-    sortino = annual_return / downside_deviation if downside_deviation > 0 else 0.0
+def compute_metrics(daily_rewards: np.ndarray) -> dict[str, float]:
+    """Compute all Zhang-style performance metrics from daily trade returns.
 
-    if curve_mode == "multiplicative":
-        equity_curve = (1.0 + clean_returns).cumprod()
-        running_max = equity_curve.cummax()
-        drawdown = (equity_curve / running_max) - 1.0
-        max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0.0
+    Parameters
+    ----------
+    daily_rewards : 1-D array of daily trade returns (already vol-scaled, net of costs).
+
+    Returns
+    -------
+    Dict with keys: E(R), Std(R), DD, Sharpe, Sortino, MDD, Calmar, %+Ret, AvgP/AvgL
+    """
+    r = np.asarray(daily_rewards, dtype=np.float64)
+    n = len(r)
+    if n < 2:
+        return {k: 0.0 for k in [
+            "E(R)", "Std(R)", "DD", "Sharpe", "Sortino",
+            "MDD", "Calmar", "%+Ret", "AvgP/AvgL",
+        ]}
+
+    mean_daily = r.mean()
+    std_daily = r.std(ddof=1)
+
+    er = mean_daily * 252
+    std_r = std_daily * math.sqrt(252)
+
+    # Downside deviation: annualized std of negative returns only
+    neg = r[r < 0]
+    if len(neg) > 1:
+        dd = neg.std(ddof=1) * math.sqrt(252)
     else:
-        cumulative_trade_return = clean_returns.cumsum()
-        running_max = cumulative_trade_return.cummax()
-        drawdown = cumulative_trade_return - running_max
-        max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0.0
-    calmar = annual_return / max_drawdown if max_drawdown > 0 else 0.0
+        dd = 1e-10
 
-    positive = clean_returns[clean_returns > 0.0]
-    negative = clean_returns[clean_returns < 0.0]
+    sharpe = er / std_r if std_r > 1e-10 else 0.0
+    sortino = er / dd if dd > 1e-10 else 0.0
 
-    metrics = {
-        "annualized_return": annual_return,
-        "annualized_volatility": annual_vol,
-        "sharpe": float(sharpe),
-        "sortino": float(sortino),
-        "max_drawdown": max_drawdown,
-        "calmar": float(calmar),
-        "hit_rate": float((clean_returns > 0.0).mean()),
-        "avg_win": float(positive.mean()) if not positive.empty else 0.0,
-        "avg_loss": float(negative.mean()) if not negative.empty else 0.0,
-        "num_days": float(len(clean_returns)),
+    # Maximum drawdown from cumulative returns
+    cum = np.cumsum(r)
+    running_max = np.maximum.accumulate(cum)
+    drawdowns = running_max - cum
+    mdd = drawdowns.max() if len(drawdowns) > 0 else 0.0
+
+    calmar = er / mdd if mdd > 1e-10 else 0.0
+
+    pct_pos = (r > 0).sum() / n * 100
+
+    pos = r[r > 0]
+    neg_abs = r[r < 0]
+    avg_p = pos.mean() if len(pos) > 0 else 0.0
+    avg_l = abs(neg_abs.mean()) if len(neg_abs) > 0 else 1e-10
+    avg_p_avg_l = avg_p / avg_l if avg_l > 1e-10 else 0.0
+
+    return {
+        "E(R)": er,
+        "Std(R)": std_r,
+        "DD": dd,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "MDD": mdd,
+        "Calmar": calmar,
+        "%+Ret": pct_pos,
+        "AvgP/AvgL": avg_p_avg_l,
     }
-    if turnover is not None:
-        metrics["avg_daily_turnover"] = float(turnover.fillna(0.0).mean())
-        metrics["total_turnover"] = float(turnover.fillna(0.0).sum())
-    if total_cost is not None:
-        metrics["total_transaction_cost"] = float(total_cost)
-    return metrics

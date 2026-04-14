@@ -8,6 +8,7 @@ dependencies = [
   "matplotlib>=3.9",
   "numpy>=2.0",
   "pandas>=2.2",
+  "pyarrow>=23.0.1",
   "torch>=2.3",
   "yfinance>=0.2",
 ]
