@@ -12,6 +12,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import torch
+
 from rl_trading.agents import A2CAgent, DQNAgent, PGAgent
 from rl_trading.baselines import (
     compute_baseline_rewards,
@@ -29,20 +31,31 @@ from rl_trading.trainer import Trainer, TrainerConfig
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
-_AGENT_FACTORIES = {
-    "dqn": lambda: (
-        DQNAgent(n_features=len(FEATURE_COLS)),
-        EnvConfig(action_mode="discrete", seq_len=60),
-    ),
-    "pg": lambda: (
-        PGAgent(n_features=len(FEATURE_COLS)),
-        EnvConfig(action_mode="discrete", seq_len=60),
-    ),
-    "a2c": lambda: (
-        A2CAgent(n_features=len(FEATURE_COLS)),
-        EnvConfig(action_mode="continuous", seq_len=60),
-    ),
-}
+
+def _detect_device() -> str:
+    """Auto-detect best available device."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _make_agent_factories(device: str) -> dict:
+    return {
+        "dqn": lambda: (
+            DQNAgent(n_features=len(FEATURE_COLS), device=device),
+            EnvConfig(action_mode="discrete", seq_len=60),
+        ),
+        "pg": lambda: (
+            PGAgent(n_features=len(FEATURE_COLS), device=device),
+            EnvConfig(action_mode="discrete", seq_len=60),
+        ),
+        "a2c": lambda: (
+            A2CAgent(n_features=len(FEATURE_COLS), device=device),
+            EnvConfig(action_mode="continuous", seq_len=60),
+        ),
+    }
 
 _BASELINE_FNS = {
     "Long": long_only,
@@ -100,6 +113,7 @@ def run_experiment(
     n_epochs: int = 200,
     patience: int = 20,
     output_dir: str = "artifacts",
+    device: str | None = None,
 ):
     """Run the full Zhang et al. experiment.
 
@@ -113,6 +127,12 @@ def run_experiment(
     """
     if agents is None:
         agents = ["dqn", "pg", "a2c"]
+
+    if device is None:
+        device = _detect_device()
+    print(f"Using device: {device}")
+
+    agent_factories = _make_agent_factories(device)
 
     # Resolve symbols and asset classes
     universe = UNIVERSE
@@ -166,7 +186,7 @@ def run_experiment(
         for agent_name in agents:
             label = agent_name.upper()
             try:
-                agent, env_cfg = _AGENT_FACTORIES[agent_name]()
+                agent, env_cfg = agent_factories[agent_name]()
                 env = TradingEnv(feat, env_cfg)
                 tcfg = TrainerConfig(
                     n_epochs=n_epochs,

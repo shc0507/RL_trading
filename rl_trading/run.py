@@ -12,6 +12,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=200, help="Training epochs per agent")
     parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     parser.add_argument("--output-dir", default="artifacts", help="Output directory")
+    parser.add_argument("--device", default=None, help="Device: cpu, cuda, mps (default: auto-detect)")
     args = parser.parse_args()
     run_experiment(
         symbols=args.symbols,
@@ -19,6 +20,7 @@ def main():
         n_epochs=args.epochs,
         patience=args.patience,
         output_dir=args.output_dir,
+        device=args.device,
     )
 
 
