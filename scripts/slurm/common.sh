@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+
 if [[ -f /etc/profile.d/modules.sh ]]; then
   # shellcheck disable=SC1091
   source /etc/profile.d/modules.sh
@@ -21,21 +24,30 @@ if [[ -n "${CONDA_SH:-}" && -f "${CONDA_SH:-}" ]]; then
   fi
 fi
 
+PROJECT_ROOT="${PROJECT_ROOT:-${DEFAULT_PROJECT_ROOT}}"
+RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR:-${PROJECT_ROOT}/artifacts/slurm/${SLURM_JOB_NAME:-zhang}_${SLURM_JOB_ID:-manual}}"
+if [[ "${RUN_OUTPUT_DIR}" != /* ]]; then
+  RUN_OUTPUT_DIR="${PROJECT_ROOT}/${RUN_OUTPUT_DIR}"
+fi
+RUN_SCRIPT="${RUN_SCRIPT:-${PROJECT_ROOT}/scripts/slurm/run_zhang_production.py}"
+
 if [[ -n "${VENV_PATH:-}" ]]; then
   # shellcheck disable=SC1090
   source "${VENV_PATH}/bin/activate"
-elif [[ -f ".venv/bin/activate" ]]; then
+elif [[ -f "${PROJECT_ROOT}/.venv/bin/activate" ]]; then
   # shellcheck disable=SC1091
-  source ".venv/bin/activate"
+  source "${PROJECT_ROOT}/.venv/bin/activate"
 fi
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
-RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR:-${PROJECT_ROOT}/artifacts/slurm/${SLURM_JOB_NAME:-zhang}_${SLURM_JOB_ID:-manual}}"
+if [[ -z "${PYTHON_BIN:-}" && -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+  PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
 DEVICE="${DEVICE:-auto}"
 SEED="${SEED:-101}"
 CV_FRACTION="${CV_FRACTION:-0.10}"
@@ -45,6 +57,16 @@ SELECTION_SPLIT="${SELECTION_SPLIT:-cv}"
 
 mkdir -p "${RUN_OUTPUT_DIR}"
 cd "${PROJECT_ROOT}"
+
+if [[ ! -f "${RUN_SCRIPT}" ]]; then
+  echo "Could not find Slurm runner at ${RUN_SCRIPT}." >&2
+  exit 1
+fi
+
+if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "Python 3.11+ is required. Set PYTHON_BIN, VENV_PATH, or CONDA_SH/CONDA_ENV_NAME before submitting." >&2
+  exit 1
+fi
 
 if [[ -z "${DATA_ROOT:-}" && -z "${SOURCE_DATASET_DIR:-}" ]]; then
   echo "Set DATA_ROOT or SOURCE_DATASET_DIR before submitting the job." >&2
@@ -75,6 +97,7 @@ fi
 echo "Project root: ${PROJECT_ROOT}"
 echo "Output dir: ${RUN_OUTPUT_DIR}"
 echo "Python: $(${PYTHON_BIN} --version 2>&1)"
+echo "Runner: ${RUN_SCRIPT}"
 echo "Device request: ${DEVICE}"
 echo "Data root: ${DATA_ROOT:-<unset>}"
 echo "Source dataset dir: ${SOURCE_DATASET_DIR:-<unset>}"

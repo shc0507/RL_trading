@@ -105,7 +105,18 @@ Running the smoke test writes artifacts under `artifacts/`, including:
 
 ## Run On Slurm
 
-The repo includes Slurm batch scripts under [scripts/slurm](/Users/haochen/projects/RL_trading/scripts/slurm). They assume the newer Zhang production path and accept runtime configuration through environment variables.
+The repo includes Slurm batch scripts under [scripts/slurm](scripts/slurm). They assume the newer Zhang production path and accept runtime configuration through environment variables.
+
+Create the repo-local environment once before submitting jobs:
+
+```bash
+uv sync --locked
+```
+
+On Linux, the project now resolves `torch` from PyTorch's official CUDA 12.4 wheel index so the repo-local `.venv` is compatible with the current `compute2` GPU driver stack.
+
+On the current `compute2` cluster, the scripts default to `#SBATCH --partition=general-gpu` because there is no system default partition. You can still override the partition at submit time with `sbatch --partition=...`.
+Submit from the repository root so `SLURM_SUBMIT_DIR` points at this checkout, or export `PROJECT_ROOT=/abs/path/to/RL_trading` before calling `sbatch`.
 
 Full suite:
 
@@ -133,11 +144,11 @@ sbatch scripts/slurm/run_zhang_full.sbatch
 
 Useful overrides:
 
-- `MODULES="cuda/12.1 python/3.11"` if your cluster requires environment modules
-- `VENV_PATH=/path/to/venv` or `CONDA_SH` plus `CONDA_ENV_NAME` if the Python environment is not repo-local
+- `MODULES="cuda13.0/toolkit"` if your cluster requires a CUDA module on top of the repo-local Python environment
+- `VENV_PATH=/path/to/venv` or `CONDA_SH` plus `CONDA_ENV_NAME` if you want to use an external Python 3.11+ environment instead of the repo-local `.venv`
 - `DEVICE=cuda` to force GPU usage
 - `DQN_OPTIMIZER_UPDATES`, `PG_TOTAL_STEPS`, `A2C_TOTAL_STEPS` to reduce or expand training budgets
-- `SLURM` resource flags can be changed either in the script headers or at submit time with `sbatch --time=... --mem=...`
+- `SLURM` resource flags can be changed either in the script headers or at submit time with `sbatch --time=... --mem=... --partition=...`
 
 ## Zhang Alignment Scope
 
