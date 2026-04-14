@@ -204,6 +204,10 @@ cython_debug/
 # Project outputs
 artifacts/
 
+# Local workspace noise
+.DS_Store
+tmp/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
