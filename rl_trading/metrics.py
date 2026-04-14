@@ -14,6 +14,7 @@ def compute_performance_metrics(
     returns: pd.Series,
     turnover: pd.Series | None = None,
     total_cost: float | None = None,
+    curve_mode: str = "additive",
 ) -> dict[str, float]:
     clean_returns = returns.fillna(0.0)
     annual_return = float(clean_returns.mean() * ANNUALIZATION_FACTOR)
@@ -23,10 +24,16 @@ def compute_performance_metrics(
     sharpe = annual_return / annual_vol if annual_vol > 0 else 0.0
     sortino = annual_return / downside_deviation if downside_deviation > 0 else 0.0
 
-    equity_curve = (1.0 + clean_returns).cumprod()
-    running_max = equity_curve.cummax()
-    drawdown = (equity_curve / running_max) - 1.0
-    max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0.0
+    if curve_mode == "multiplicative":
+        equity_curve = (1.0 + clean_returns).cumprod()
+        running_max = equity_curve.cummax()
+        drawdown = (equity_curve / running_max) - 1.0
+        max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0.0
+    else:
+        cumulative_trade_return = clean_returns.cumsum()
+        running_max = cumulative_trade_return.cummax()
+        drawdown = cumulative_trade_return - running_max
+        max_drawdown = abs(float(drawdown.min())) if not drawdown.empty else 0.0
     calmar = annual_return / max_drawdown if max_drawdown > 0 else 0.0
 
     positive = clean_returns[clean_returns > 0.0]

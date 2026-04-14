@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from .config import DEFAULT_COST_RATE_BP, DEFAULT_FEATURE_COLUMNS, DEFAULT_SPLITS, DEFAULT_VOL_TARGET
+from .config import ANNUALIZATION_FACTOR, DEFAULT_COST_RATE_BP, DEFAULT_FEATURE_COLUMNS, DEFAULT_SPLITS, DEFAULT_VOL_TARGET
 
 
 @dataclass(slots=True)
@@ -81,13 +81,18 @@ class TradingEnv:
         turnover = abs(action - self.position)
         raw_pnl = action * (price_next - price_now) - (cost_rate * price_now * turnover)
         raw_return = action * pct_change - (cost_rate * turnover)
+        raw_pre_cost_pnl = action * (price_next - price_now)
 
         current_vol = max(float(current["ewm_vol_60"]), 1e-8)
-        previous_scaled_position = 0.0 if self.current_vol is None else self.position * (self.config.vol_target / self.current_vol)
-        scaled_action = action * (self.config.vol_target / current_vol)
+        daily_target_vol = self._daily_target_vol()
+        previous_scaled_position = 0.0 if self.current_vol is None else self.position * (daily_target_vol / self.current_vol)
+        scaled_action = action * (daily_target_vol / current_vol)
         scaled_turnover = abs(scaled_action - previous_scaled_position)
         zhang_reward = scaled_action * (price_next - price_now) - (cost_rate * price_now * scaled_turnover)
         zhang_return = scaled_action * pct_change - (cost_rate * scaled_turnover)
+        trade_cost = cost_rate * price_now * scaled_turnover
+        pre_cost_trade_return = scaled_action * (price_next - price_now)
+        trade_return = pre_cost_trade_return - trade_cost
 
         self.position = action
         self.current_vol = current_vol
@@ -103,13 +108,18 @@ class TradingEnv:
             "split": self.split,
             "action": action,
             "turnover": turnover,
+            "scaled_position": scaled_action,
             "scaled_turnover": scaled_turnover,
+            "raw_pre_cost_pnl": raw_pre_cost_pnl,
             "raw_pnl": raw_pnl,
             "raw_return": raw_return,
             "raw_cost": cost_rate * price_now * turnover,
             "raw_cost_return": cost_rate * turnover,
             "zhang_reward": zhang_reward,
             "zhang_return": zhang_return,
+            "trade_return": trade_return,
+            "pre_cost_trade_return": pre_cost_trade_return,
+            "trade_cost": trade_cost,
             "zhang_cost": cost_rate * price_now * scaled_turnover,
             "zhang_cost_return": cost_rate * scaled_turnover,
             "price_now": price_now,
@@ -143,3 +153,6 @@ class TradingEnv:
             discrete_choices = np.array([-1.0, 0.0, 1.0])
             action = float(discrete_choices[np.abs(discrete_choices - action).argmin()])
         return action
+
+    def _daily_target_vol(self) -> float:
+        return float(self.config.vol_target) / np.sqrt(ANNUALIZATION_FACTOR)

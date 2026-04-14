@@ -37,6 +37,7 @@ from .zhang_eval import ZhangEvalConfig, run_zhang_evaluation
 class DQNConfig:
     policy_name: str | None = None
     total_steps: int = 20_000
+    optimizer_updates: int | None = None
     batch_size: int = 128
     replay_capacity: int = 100_000
     warmup_steps: int = 2_000
@@ -52,10 +53,17 @@ class DQNConfig:
     network_type: str = "mlp"
     recurrent_hidden_size: int = 128
     recurrent_layers: int = 2
+    recurrent_layer_sizes: tuple[int, ...] | None = None
+    recurrent_dropout: float = 0.0
+    head_dropout: float = 0.0
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 20_000
     validation_interval: int = 2_000
+    selection_mode: str = "validation"
+    validation_split_name: str = "val"
+    early_stopping_patience_epochs: int | None = None
+    epoch_steps: int | None = None
     reward_mode: str = "zhang"
     cost_rate_bp: float = DEFAULT_COST_RATE_BP
     vol_target: float = DEFAULT_VOL_TARGET
@@ -172,6 +180,9 @@ class DQNTrainer:
             feature_size=len(self.rl_env.feature_columns),
             recurrent_hidden_size=self.config.recurrent_hidden_size,
             recurrent_layers=self.config.recurrent_layers,
+            recurrent_layer_sizes=self.config.recurrent_layer_sizes,
+            recurrent_dropout=self.config.recurrent_dropout,
+            head_dropout=self.config.head_dropout,
         )
         self.buffer = ReplayBuffer(
             capacity=self.config.replay_capacity,
@@ -276,17 +287,37 @@ class DQNTrainer:
         self._write_frame_csv_atomic(self.report_dir / f"{prefix}_trades.csv", report.trade_log)
         self._write_frame_csv_atomic(self.report_dir / f"{prefix}_symbol_metrics.csv", report.symbol_metrics)
 
+    def _default_epoch_steps(self) -> int:
+        train_split_name = "train"
+        start_date, end_date = self.splits[train_split_name]
+        frame = self.feature_frame.loc[
+            self.feature_frame["symbol"].isin(self.symbols_by_split.get(train_split_name, []))
+            & (self.feature_frame["date"] >= pd.Timestamp(start_date))
+            & (self.feature_frame["date"] <= pd.Timestamp(end_date))
+            & self.feature_frame["window_ready"]
+        ]
+        return max(1, int(len(frame)))
+
     def train(self) -> TrainingArtifacts:
         config_path = self._persist_config()
         progress_rows: list[dict[str, object]] = []
         best_metric = float("-inf")
         has_validation = False
+        update_count = 0
+        patience = self.config.early_stopping_patience_epochs
+        epochs_since_improvement = 0
+        validation_interval = int(self.config.validation_interval) if self.config.validation_interval > 0 else 0
+        if validation_interval <= 0 and self.config.selection_mode == "validation":
+            validation_interval = int(self.config.epoch_steps or self._default_epoch_steps())
+        current_epoch = 0
 
         state, _ = self.rl_env.reset(symbol=self._sample_symbol("train"), split="train")
         episode_return = 0.0
         episode_length = 0
 
-        for step in range(1, self.config.total_steps + 1):
+        step = 0
+        while True:
+            step += 1
             epsilon = self._epsilon(step - 1)
             if self.rng.random() < epsilon:
                 action_id = int(self.rng.integers(self.rl_env.action_size))
@@ -306,6 +337,7 @@ class DQNTrainer:
                 and step % self.config.train_every == 0
             ):
                 update_info = self.agent.update(self.buffer.sample(self.config.batch_size), step=step)
+                update_count += 1
                 progress_rows.append(
                     {
                         "event": "update",
@@ -339,11 +371,13 @@ class DQNTrainer:
                 episode_length = 0
 
             if (
-                self.config.validation_interval > 0
-                and step % self.config.validation_interval == 0
-                and self.symbols_by_split.get("val")
+                self.config.selection_mode == "validation"
+                and validation_interval > 0
+                and step % validation_interval == 0
+                and self.symbols_by_split.get(self.config.validation_split_name)
             ):
-                report = self._evaluate_split(self._current_policy(), split="val")
+                current_epoch += 1
+                report = self._evaluate_split(self._current_policy(), split=self.config.validation_split_name)
                 if report is not None:
                     has_validation = True
                     metric = float(report.portfolio_metrics[self.config.checkpoint_metric])
@@ -351,6 +385,7 @@ class DQNTrainer:
                         {
                             "event": "validation",
                             "step": step,
+                            "epoch": current_epoch,
                             "epsilon": epsilon,
                             "loss": np.nan,
                             "mean_q": np.nan,
@@ -363,9 +398,20 @@ class DQNTrainer:
                     if metric > best_metric:
                         best_metric = metric
                         self.agent.save(self.best_checkpoint_path)
+                        epochs_since_improvement = 0
+                    else:
+                        epochs_since_improvement += 1
+                    if patience is not None and epochs_since_improvement >= int(patience):
+                        break
+
+            if self.config.optimizer_updates is not None:
+                if update_count >= self.config.optimizer_updates:
+                    break
+            elif step >= self.config.total_steps:
+                break
 
         self.agent.save(self.final_checkpoint_path)
-        if not has_validation:
+        if self.config.selection_mode == "final" or not has_validation:
             self.agent.save(self.best_checkpoint_path)
         self.agent.load(self.best_checkpoint_path)
 
@@ -405,7 +451,7 @@ class DQNTrainer:
             config=ZhangEvalConfig(
                 target_vol=self.config.vol_target,
                 split=None,
-                return_column="raw_return" if self.env_config.reward_mode == "raw" else "zhang_return",
+                return_column="trade_return" if self.env_config.reward_mode == "zhang" else "raw_pnl",
             ),
         )
 

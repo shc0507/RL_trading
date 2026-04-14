@@ -39,8 +39,14 @@ class Backtester:
         logs: list[dict[str, object]] = []
         symbol_metric_rows = []
 
-        return_column = "raw_return" if self.env_config.reward_mode == "raw" else "zhang_return"
-        cost_column = "raw_cost" if self.env_config.reward_mode == "raw" else "zhang_cost"
+        if self.env_config.reward_mode == "raw":
+            return_column = "raw_pnl"
+            turnover_column = "turnover"
+            cost_column = "raw_cost"
+        else:
+            return_column = "trade_return"
+            turnover_column = "scaled_turnover"
+            cost_column = "trade_cost"
 
         for symbol in symbol_list:
             observation = self.env.reset(symbol=symbol, split=split)
@@ -53,7 +59,7 @@ class Backtester:
             symbol_log = pd.DataFrame([row for row in logs if row["symbol"] == symbol and row["split"] == split])
             metrics = compute_performance_metrics(
                 symbol_log[return_column],
-                turnover=symbol_log["turnover"],
+                turnover=symbol_log[turnover_column],
                 total_cost=float(symbol_log[cost_column].sum()),
             )
             metrics["symbol"] = symbol
@@ -65,12 +71,14 @@ class Backtester:
             split_trade_log.groupby("date", as_index=False)
             .agg(
                 portfolio_return=(return_column, "mean"),
-                avg_turnover=("turnover", "mean"),
+                avg_turnover=(turnover_column, "mean"),
                 total_cost=(cost_column, "sum"),
             )
             .sort_values("date")
             .reset_index(drop=True)
         )
+        daily_returns["portfolio_cumulative_trade_return"] = daily_returns["portfolio_return"].fillna(0.0).cumsum()
+        daily_returns["cumulative_trade_return"] = daily_returns["portfolio_cumulative_trade_return"]
 
         portfolio_metrics = compute_performance_metrics(
             daily_returns["portfolio_return"],

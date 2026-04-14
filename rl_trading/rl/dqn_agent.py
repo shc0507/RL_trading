@@ -34,6 +34,9 @@ class DQNAgent:
         feature_size: int | None = None,
         recurrent_hidden_size: int = 128,
         recurrent_layers: int = 2,
+        recurrent_layer_sizes: Sequence[int] | None = None,
+        recurrent_dropout: float = 0.0,
+        head_dropout: float = 0.0,
     ) -> None:
         self.device = resolve_device(device)
         self.gamma = float(gamma)
@@ -54,6 +57,9 @@ class DQNAgent:
             feature_size=feature_size,
             recurrent_hidden_size=recurrent_hidden_size,
             recurrent_layers=recurrent_layers,
+            recurrent_layer_sizes=recurrent_layer_sizes,
+            recurrent_dropout=recurrent_dropout,
+            head_dropout=head_dropout,
         ).to(self.device)
         self.target_net = deepcopy(self.q_net).to(self.device)
         self.optimizer = optim.AdamW(self.q_net.parameters(), lr=lr)

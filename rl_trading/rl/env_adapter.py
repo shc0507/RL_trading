@@ -213,7 +213,10 @@ class ContinuousActorPolicy:
         )
         if hasattr(self.agent, "get_action"):
             try:
-                return float(self.agent.get_action(state, deterministic=True))
+                action = self.agent.get_action(state, deterministic=True)
             except TypeError:
-                return float(self.agent.get_action(state))
+                action = self.agent.get_action(state)
+            if isinstance(action, tuple):
+                action = action[0]
+            return float(np.asarray(action, dtype=np.float32).reshape(-1)[0])
         raise TypeError("agent does not expose get_action")

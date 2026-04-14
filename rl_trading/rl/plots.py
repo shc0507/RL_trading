@@ -218,7 +218,7 @@ def ensure_zhang_eval_artifacts(
     artifact_dir: str | Path,
     *,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> Path:
     artifact_path = Path(artifact_dir)
     zhang_dir = _zhang_eval_dir(artifact_path)
@@ -276,7 +276,7 @@ def load_zhang_portfolio_reports(
     scaled: bool = True,
     policies: list[str] | tuple[str, ...] | None = None,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> pd.DataFrame:
     zhang_dir = ensure_zhang_eval_artifacts(
         artifact_dir=artifact_dir,
@@ -300,7 +300,7 @@ def load_zhang_contract_metrics(
     *,
     policies: list[str] | tuple[str, ...] | None = None,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> pd.DataFrame:
     zhang_dir = ensure_zhang_eval_artifacts(
         artifact_dir=artifact_dir,
@@ -322,7 +322,7 @@ def load_zhang_cost_sweep(
     *,
     policies: list[str] | tuple[str, ...] | None = None,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> pd.DataFrame:
     zhang_dir = ensure_zhang_eval_artifacts(
         artifact_dir=artifact_dir,
@@ -342,11 +342,12 @@ def compute_symbol_diagnostics(
     artifact_dir: str | Path,
     split: str,
     policies: list[str] | tuple[str, ...] | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> pd.DataFrame:
     reports_dir = _reports_dir(artifact_dir)
     rows: list[dict[str, object]] = []
     requested = set(policies) if policies else None
+    turnover_column = "scaled_turnover" if return_column in {"trade_return", "zhang_return", "zhang_reward"} else "turnover"
     for path in sorted(reports_dir.glob(f"*_{split}_trades.csv")):
         policy = path.name[: -len(f"_{split}_trades.csv")]
         if requested is not None and policy not in requested:
@@ -354,8 +355,10 @@ def compute_symbol_diagnostics(
         trades = pd.read_csv(path)
         if return_column not in trades.columns:
             raise ValueError(f"{path.name} does not contain return column {return_column}")
+        if turnover_column not in trades.columns:
+            raise ValueError(f"{path.name} does not contain turnover column {turnover_column}")
         for symbol, symbol_frame in trades.groupby("symbol", sort=False):
-            turnover = symbol_frame["turnover"].fillna(0.0)
+            turnover = symbol_frame[turnover_column].fillna(0.0)
             returns = symbol_frame[return_column].fillna(0.0)
             metrics = compute_performance_metrics(returns, turnover=turnover)
             total_turnover = float(turnover.sum())
@@ -434,7 +437,7 @@ def plot_zhang_cumulative_trade_returns(
     policies: list[str] | tuple[str, ...] | None = None,
     scaled: bool = True,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
     robust_ylim: bool = False,
     robust_quantile: float = 0.98,
     ylim_cap: float | None = None,
@@ -508,7 +511,7 @@ def plot_symbol_diagnostics(
     split: str = "test",
     output_path: str | Path | None = None,
     policies: list[str] | tuple[str, ...] | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> Path:
     diagnostics = compute_symbol_diagnostics(
         artifact_dir=artifact_dir,
@@ -553,7 +556,7 @@ def plot_zhang_contract_diagnostics(
     *,
     policies: list[str] | tuple[str, ...] | None = None,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> Path:
     diagnostics = load_zhang_contract_metrics(
         artifact_dir=artifact_dir,
@@ -605,7 +608,7 @@ def plot_zhang_cost_sweep(
     *,
     policies: list[str] | tuple[str, ...] | None = None,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> Path:
     frame = load_zhang_cost_sweep(
         artifact_dir=artifact_dir,
@@ -659,7 +662,7 @@ def generate_legacy_plots(
     artifact_dir: str | Path,
     split: str = "test",
     policies: list[str] | tuple[str, ...] | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
 ) -> PlotArtifacts:
     return PlotArtifacts(
         cumulative_returns_path=plot_cumulative_returns(
@@ -683,7 +686,7 @@ def generate_zhang_style_plots(
     *,
     policies: list[str] | tuple[str, ...] | None = None,
     target_vol: float | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
     include_cost_sweep: bool = True,
 ) -> PlotArtifacts:
     cumulative_path = plot_zhang_cumulative_trade_returns(
@@ -724,7 +727,7 @@ def generate_paper_style_plots(
     artifact_dir: str | Path,
     split: str = "test",
     policies: list[str] | tuple[str, ...] | None = None,
-    return_column: str = "zhang_return",
+    return_column: str = "trade_return",
     *,
     style: str = "zhang",
     target_vol: float | None = None,

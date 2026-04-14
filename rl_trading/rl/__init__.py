@@ -20,6 +20,7 @@ from .env_adapter import (
     DiscreteTradingEnv,
     encode_observation,
 )
+from .on_policy_trainer import OnPolicyConfig, OnPolicyTrainer, train_on_policy as train_on_policy_legacy
 from .plots import (
     PlotArtifacts,
     compute_symbol_diagnostics,
@@ -48,10 +49,32 @@ from .policy_gradient import (
     discounted_return,
     discounted_reward_to_go,
 )
+from .production_a2c import ProductionA2CConfig, ProductionA2CTrainer
+from .production_pg import ProductionPGConfig, ProductionPGTrainer
 from .replay_buffer import ReplayBuffer, TransitionBatch
-from .on_policy_trainer import OnPolicyConfig, OnPolicyTrainer, train_on_policy
-from .trainer import DQNConfig, DQNTrainer, TrainingArtifacts, load_or_build_features, train_dqn
+from .trainer import DQNConfig, DQNTrainer, TrainingArtifacts, load_or_build_features, train_dqn as train_dqn_legacy
 from .zhang_eval import ZhangEvalArtifacts, ZhangEvalConfig, ZhangEvaluator, run_zhang_evaluation
+from .zhang_production import (
+    BASELINE_POLICIES,
+    PRODUCTION_POLICIES,
+    ProductionDatasetConfig,
+    ProductionDQNConfig,
+    ProductionRunArtifacts,
+    ProductionSuiteConfig,
+    WalkForwardConfig,
+    WalkForwardWindow,
+    _production_a2c_config,
+    _production_dqn_config,
+    prepare_production_dataset,
+    run_production_suite,
+    train_a2c_production,
+    train_dqn_production,
+    train_pg_production,
+    validate_production_dataset,
+)
+
+train_dqn = train_dqn_production
+train_on_policy = train_a2c_production
 
 __all__ = [
     "DQNAgent",
@@ -76,6 +99,14 @@ __all__ = [
     "OnPolicyTrainer",
     "PPOAgent",
     "PlotArtifacts",
+    "ProductionA2CConfig",
+    "ProductionA2CTrainer",
+    "ProductionDatasetConfig",
+    "ProductionDQNConfig",
+    "ProductionPGConfig",
+    "ProductionPGTrainer",
+    "ProductionRunArtifacts",
+    "ProductionSuiteConfig",
     "QNetwork",
     "ReplayBuffer",
     "SACAgent",
@@ -85,9 +116,13 @@ __all__ = [
     "TransitionBatch",
     "TwinQCritic",
     "ValueCritic",
+    "WalkForwardConfig",
+    "WalkForwardWindow",
     "ZhangEvalArtifacts",
     "ZhangEvalConfig",
     "ZhangEvaluator",
+    "BASELINE_POLICIES",
+    "PRODUCTION_POLICIES",
     "compute_symbol_diagnostics",
     "compute_gae",
     "discounted_return",
@@ -108,8 +143,18 @@ __all__ = [
     "plot_zhang_contract_diagnostics",
     "plot_zhang_cost_sweep",
     "plot_zhang_cumulative_trade_returns",
+    "prepare_production_dataset",
+    "_production_a2c_config",
+    "_production_dqn_config",
     "run_zhang_evaluation",
+    "run_production_suite",
     "train_continuous",
     "train_dqn",
+    "train_dqn_legacy",
     "train_on_policy",
+    "train_on_policy_legacy",
+    "train_a2c_production",
+    "train_dqn_production",
+    "train_pg_production",
+    "validate_production_dataset",
 ]

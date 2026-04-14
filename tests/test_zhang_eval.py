@@ -36,6 +36,7 @@ def make_trade_logs() -> pd.DataFrame:
                     "next_date": next_dates[index],
                     "symbol": symbol,
                     "split": "test",
+                    "scaled_position": 0.5 if trade_return >= 0.0 else -0.5,
                     "turnover": turnover,
                     "scaled_turnover": scaled_turnover,
                     "raw_return": trade_return + zhang_cost_return - raw_cost_return,
@@ -44,6 +45,9 @@ def make_trade_logs() -> pd.DataFrame:
                     "zhang_return": trade_return,
                     "zhang_cost_return": zhang_cost_return,
                     "zhang_cost": zhang_cost_return * price_now,
+                    "trade_return": trade_return * price_now,
+                    "pre_cost_trade_return": (trade_return + zhang_cost_return) * price_now,
+                    "trade_cost": zhang_cost_return * price_now,
                     "price_now": price_now,
                     "policy": policy,
                 }
@@ -95,6 +99,13 @@ class ZhangEvalTests(unittest.TestCase):
         )
         instrument_groups = results["instrument_groups"].set_index("symbol")["asset_group"].to_dict()
         self.assertEqual(instrument_groups["AAA"], "equity_index")
+
+        contract_daily = results["contract_daily_returns"]
+        self.assertTrue(
+            {"trade_return", "trade_cost", "scaled_turnover", "pre_cost_trade_return", "scaled_position"}.issubset(
+                contract_daily.columns
+            )
+        )
 
     def test_portfolio_scaling_and_cost_sweep_outputs_change_with_targeting(self) -> None:
         evaluator = ZhangEvaluator(

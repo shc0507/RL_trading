@@ -22,7 +22,7 @@ class ZhangEvalConfig:
     cost_grid_bp: tuple[float, ...] = (1.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0)
     split: str | None = None
     group_by_asset_class: bool = True
-    return_column: str = "zhang_return"
+    return_column: str = "trade_return"
     vol_span: int = VOLATILITY_SPAN
 
 
@@ -101,11 +101,19 @@ def _load_instrument_groups(artifact_dir: Path, trade_logs: pd.DataFrame) -> pd.
 
 
 def _effective_columns(return_column: str) -> tuple[str, str, str]:
+    if return_column in {"trade_return", "zhang_reward"}:
+        return "scaled_turnover", "trade_cost", "pre_cost_trade_return"
     if return_column == "zhang_return":
-        return "scaled_turnover", "zhang_cost_return", "zhang_cost"
+        return "scaled_turnover", "zhang_cost", "zhang_cost_return"
     if return_column == "raw_return":
-        return "turnover", "raw_cost_return", "raw_cost"
+        return "turnover", "raw_cost", "raw_cost_return"
+    if return_column == "raw_pnl":
+        return "turnover", "raw_cost", "raw_pre_cost_pnl"
     raise ValueError(f"unsupported return_column {return_column}")
+
+
+def _uses_additive_trade_returns(return_column: str) -> bool:
+    return return_column in {"trade_return", "zhang_reward", "raw_pnl"}
 
 
 class ZhangEvaluator:
@@ -123,10 +131,10 @@ class ZhangEvaluator:
         self.config = config or ZhangEvalConfig()
         self.artifact_dir = Path(artifact_dir) if artifact_dir is not None else None
 
-        turnover_column, cost_return_column, cost_amount_column = _effective_columns(self.config.return_column)
+        turnover_column, cost_column, pre_cost_column = _effective_columns(self.config.return_column)
         self.turnover_column = turnover_column
-        self.cost_return_column = cost_return_column
-        self.cost_amount_column = cost_amount_column
+        self.cost_column = cost_column
+        self.pre_cost_column = pre_cost_column
 
         instrument_frame = self.instruments.loc[:, ["symbol", "asset_class", "asset_group"]].drop_duplicates()
         self.trade_logs = self.trade_logs.merge(instrument_frame, how="left", on="symbol")
@@ -136,9 +144,13 @@ class ZhangEvaluator:
         )
         self.trade_logs["contract_return"] = self.trade_logs[self.config.return_column].fillna(0.0).astype(float)
         self.trade_logs["effective_turnover"] = self.trade_logs[self.turnover_column].fillna(0.0).astype(float)
-        self.trade_logs["cost_return"] = self.trade_logs[self.cost_return_column].fillna(0.0).astype(float)
-        self.trade_logs["cost_amount"] = self.trade_logs[self.cost_amount_column].fillna(0.0).astype(float)
-        self.trade_logs["pre_cost_return"] = self.trade_logs["contract_return"] + self.trade_logs["cost_return"]
+        self.trade_logs["cost_amount"] = self.trade_logs[self.cost_column].fillna(0.0).astype(float)
+        if self.config.return_column in {"zhang_return", "raw_return"}:
+            self.trade_logs["cost_return"] = self.trade_logs[self.pre_cost_column].fillna(0.0).astype(float)
+            self.trade_logs["pre_cost_return"] = self.trade_logs["contract_return"] + self.trade_logs["cost_return"]
+        else:
+            self.trade_logs["pre_cost_return"] = self.trade_logs[self.pre_cost_column].fillna(0.0).astype(float)
+            self.trade_logs["cost_return"] = self.trade_logs["pre_cost_return"] - self.trade_logs["contract_return"]
 
     @classmethod
     def from_artifact_dir(
@@ -175,7 +187,21 @@ class ZhangEvaluator:
             "cost_amount",
             "pre_cost_return",
         ]
-        return self.trade_logs.loc[:, columns].sort_values(["policy", "split", "asset_group", "symbol", "date"]).reset_index(drop=True)
+        optional_columns = [
+            column
+            for column in ("scaled_position", "scaled_turnover", "pre_cost_trade_return", "trade_return", "trade_cost")
+            if column in self.trade_logs.columns
+        ]
+        frame = self.trade_logs.loc[:, columns + optional_columns].copy()
+        if "scaled_position" not in frame.columns:
+            frame["scaled_position"] = np.nan
+        if "scaled_turnover" not in frame.columns:
+            frame["scaled_turnover"] = frame["effective_turnover"]
+        if "pre_cost_trade_return" not in frame.columns:
+            frame["pre_cost_trade_return"] = frame["pre_cost_return"]
+        frame["trade_return"] = frame["contract_return"]
+        frame["trade_cost"] = frame["cost_amount"]
+        return frame.sort_values(["policy", "split", "asset_group", "symbol", "date"]).reset_index(drop=True)
 
     def build_contract_metrics(self) -> pd.DataFrame:
         rows: list[dict[str, object]] = []
@@ -225,7 +251,8 @@ class ZhangEvaluator:
             daily["split"] = split
             daily["asset_group"] = asset_group
             daily["contract_count"] = contract_count
-            daily["cumulative_trade_return"] = daily["portfolio_return"].fillna(0.0).cumsum()
+            daily["portfolio_cumulative_trade_return"] = daily["portfolio_return"].fillna(0.0).cumsum()
+            daily["cumulative_trade_return"] = daily["portfolio_cumulative_trade_return"]
             rows.append(daily)
         return pd.concat(rows, ignore_index=True).sort_values(["policy", "split", "asset_group", "date"]).reset_index(drop=True)
 
@@ -241,7 +268,8 @@ class ZhangEvaluator:
             scaled_frame["portfolio_return"] = scaled["portfolio_return"]
             scaled_frame["portfolio_scale_factor"] = scaled["portfolio_scale_factor"]
             scaled_frame["portfolio_lagged_vol"] = scaled["portfolio_lagged_vol"]
-            scaled_frame["cumulative_trade_return"] = scaled_frame["portfolio_return"].fillna(0.0).cumsum()
+            scaled_frame["portfolio_cumulative_trade_return"] = scaled_frame["portfolio_return"].fillna(0.0).cumsum()
+            scaled_frame["cumulative_trade_return"] = scaled_frame["portfolio_cumulative_trade_return"]
             rows.append(scaled_frame)
         return pd.concat(rows, ignore_index=True).sort_values(["policy", "split", "asset_group", "date"]).reset_index(drop=True)
 
@@ -263,7 +291,7 @@ class ZhangEvaluator:
                     **metrics,
                     "pct_positive_returns": float(metrics["hit_rate"]),
                     "avg_positive_negative_return_ratio": float(metrics["avg_win"] / avg_loss) if pd.notna(avg_loss) else 0.0,
-                    "cumulative_trade_return_final": float(frame["cumulative_trade_return"].iloc[-1]) if not frame.empty else 0.0,
+                    "cumulative_trade_return_final": float(frame["portfolio_cumulative_trade_return"].iloc[-1]) if not frame.empty else 0.0,
                     "contract_count": int(frame["contract_count"].iloc[0]) if not frame.empty else 0,
                 }
             )
@@ -272,13 +300,17 @@ class ZhangEvaluator:
     def _cost_sweep_rows(self) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
         grouped = self._group_frame()
+        additive_returns = _uses_additive_trade_returns(self.config.return_column)
         for cost_bp in self.config.cost_grid_bp:
             for (policy, split, asset_group), frame in grouped.groupby(["policy", "split", "asset_group"], sort=False):
                 adjusted = frame.copy()
                 cost_rate = float(cost_bp) / 10_000.0
-                adjusted["adjusted_cost_return"] = cost_rate * adjusted["effective_turnover"]
                 adjusted["adjusted_cost_amount"] = cost_rate * adjusted["price_now"] * adjusted["effective_turnover"]
-                adjusted["adjusted_contract_return"] = adjusted["pre_cost_return"] - adjusted["adjusted_cost_return"]
+                if additive_returns:
+                    adjusted["adjusted_contract_return"] = adjusted["pre_cost_return"] - adjusted["adjusted_cost_amount"]
+                else:
+                    adjusted["adjusted_cost_return"] = cost_rate * adjusted["effective_turnover"]
+                    adjusted["adjusted_contract_return"] = adjusted["pre_cost_return"] - adjusted["adjusted_cost_return"]
 
                 daily = (
                     adjusted.groupby("date", as_index=False)

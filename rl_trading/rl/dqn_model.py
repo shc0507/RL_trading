@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 from torch import nn
 
+from .sequence_encoder import StackedLSTMStateEncoder, normalize_recurrent_layer_sizes
 from .torch_utils import build_mlp
 
 
@@ -17,6 +18,7 @@ class QNetwork(nn.Module):
         action_size: int,
         hidden_sizes: Sequence[int] = (256, 256),
         activation: str = "relu",
+        head_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.q_head = build_mlp(
@@ -24,6 +26,7 @@ class QNetwork(nn.Module):
             output_size=action_size,
             hidden_sizes=hidden_sizes,
             activation=activation,
+            dropout=head_dropout,
         )
 
     def forward(self, state):
@@ -37,6 +40,7 @@ class DuelingQNetwork(nn.Module):
         action_size: int,
         hidden_sizes: Sequence[int] = (256, 256),
         activation: str = "relu",
+        head_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         trunk_sizes = tuple(hidden_sizes)
@@ -47,6 +51,7 @@ class DuelingQNetwork(nn.Module):
                 output_size=trunk_output,
                 hidden_sizes=trunk_sizes[:-1],
                 activation=activation,
+                dropout=head_dropout,
             )
         else:
             trunk_output = state_size
@@ -56,12 +61,14 @@ class DuelingQNetwork(nn.Module):
             output_size=1,
             hidden_sizes=(),
             activation=activation,
+            dropout=head_dropout,
         )
         self.advantage_head = build_mlp(
             input_size=trunk_output,
             output_size=action_size,
             hidden_sizes=(),
             activation=activation,
+            dropout=head_dropout,
         )
 
     def forward(self, state):
@@ -82,37 +89,39 @@ class LSTMQNetwork(nn.Module):
         activation: str = "relu",
         recurrent_hidden_size: int = 128,
         recurrent_layers: int = 2,
+        recurrent_layer_sizes: Sequence[int] | None = None,
         dueling: bool = False,
+        recurrent_dropout: float = 0.0,
+        head_dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        self.observation_window = int(observation_window)
-        self.feature_size = int(feature_size)
-        self.sequence_size = self.observation_window * self.feature_size
-        expected_state_size = self.sequence_size + 1
-        if int(state_size) != expected_state_size:
-            raise ValueError(
-                f"LSTMQNetwork expected state_size={expected_state_size}, got {state_size}"
-            )
         self.dueling = bool(dueling)
-        self.lstm = nn.LSTM(
-            input_size=self.feature_size,
-            hidden_size=int(recurrent_hidden_size),
-            num_layers=max(1, int(recurrent_layers)),
-            batch_first=True,
+        self.encoder = StackedLSTMStateEncoder(
+            state_size=state_size,
+            observation_window=observation_window,
+            feature_size=feature_size,
+            recurrent_layer_sizes=normalize_recurrent_layer_sizes(
+                recurrent_hidden_size=recurrent_hidden_size,
+                recurrent_layers=recurrent_layers,
+                recurrent_layer_sizes=recurrent_layer_sizes,
+            ),
+            recurrent_dropout=recurrent_dropout,
         )
-        head_input_size = int(recurrent_hidden_size) + 1
+        head_input_size = self.encoder.output_size
         if self.dueling:
             self.value_head = build_mlp(
                 input_size=head_input_size,
                 output_size=1,
                 hidden_sizes=hidden_sizes,
                 activation=activation,
+                dropout=head_dropout,
             )
             self.advantage_head = build_mlp(
                 input_size=head_input_size,
                 output_size=action_size,
                 hidden_sizes=hidden_sizes,
                 activation=activation,
+                dropout=head_dropout,
             )
         else:
             self.q_head = build_mlp(
@@ -120,20 +129,11 @@ class LSTMQNetwork(nn.Module):
                 output_size=action_size,
                 hidden_sizes=hidden_sizes,
                 activation=activation,
+                dropout=head_dropout,
             )
 
     def _encode(self, state: torch.Tensor) -> torch.Tensor:
-        if state.ndim != 2:
-            raise ValueError("LSTMQNetwork expects a 2D batch of flattened states")
-        sequence = state[:, : self.sequence_size].reshape(
-            state.shape[0],
-            self.observation_window,
-            self.feature_size,
-        )
-        position = state[:, self.sequence_size : self.sequence_size + 1]
-        output, _ = self.lstm(sequence)
-        last_hidden = output[:, -1, :]
-        return torch.cat([last_hidden, position], dim=1)
+        return self.encoder(state)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         latent = self._encode(state)
@@ -155,6 +155,9 @@ def build_q_network(
     feature_size: int | None = None,
     recurrent_hidden_size: int = 128,
     recurrent_layers: int = 2,
+    recurrent_layer_sizes: Sequence[int] | None = None,
+    recurrent_dropout: float = 0.0,
+    head_dropout: float = 0.0,
 ) -> nn.Module:
     normalized = network_type.lower()
     if normalized == "mlp":
@@ -164,12 +167,14 @@ def build_q_network(
                 action_size=action_size,
                 hidden_sizes=hidden_sizes,
                 activation=activation,
+                head_dropout=head_dropout,
             )
         return QNetwork(
             state_size=state_size,
             action_size=action_size,
             hidden_sizes=hidden_sizes,
             activation=activation,
+            head_dropout=head_dropout,
         )
     if normalized == "lstm":
         if observation_window is None or feature_size is None:
@@ -183,6 +188,9 @@ def build_q_network(
             activation=activation,
             recurrent_hidden_size=recurrent_hidden_size,
             recurrent_layers=recurrent_layers,
+            recurrent_layer_sizes=recurrent_layer_sizes,
             dueling=dueling,
+            recurrent_dropout=recurrent_dropout,
+            head_dropout=head_dropout,
         )
     raise ValueError(f"unsupported DQN network_type {network_type}")

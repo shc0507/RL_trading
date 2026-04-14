@@ -103,6 +103,42 @@ Running the smoke test writes artifacts under `artifacts/`, including:
 - `artifacts/rl/zhang_eval/`: scaled and unscaled portfolio summaries, contract metrics, daily portfolio return series, cost sweeps, and instrument grouping metadata
 - `artifacts/rl/plots/`: legacy and Zhang-aligned figures
 
+## Run On Slurm
+
+The repo includes Slurm batch scripts under [scripts/slurm](/Users/haochen/projects/RL_trading/scripts/slurm). They assume the newer Zhang production path and accept runtime configuration through environment variables.
+
+Full suite:
+
+```bash
+export SOURCE_DATASET_DIR=/path/to/processed_dataset
+export RUN_OUTPUT_DIR=/path/to/job_outputs/zhang_full_${USER}
+sbatch scripts/slurm/run_zhang_full.sbatch
+```
+
+Single algorithm:
+
+```bash
+export SOURCE_DATASET_DIR=/path/to/processed_dataset
+export RUN_OUTPUT_DIR=/path/to/job_outputs/zhang_dqn_${USER}
+sbatch scripts/slurm/run_zhang_dqn.sbatch
+```
+
+You can also point directly at raw institutional CSV inputs instead of a prebuilt dataset:
+
+```bash
+export DATA_ROOT=/path/to/institutional_csvs
+export UNIVERSE_MANIFEST=/path/to/universe.csv
+sbatch scripts/slurm/run_zhang_full.sbatch
+```
+
+Useful overrides:
+
+- `MODULES="cuda/12.1 python/3.11"` if your cluster requires environment modules
+- `VENV_PATH=/path/to/venv` or `CONDA_SH` plus `CONDA_ENV_NAME` if the Python environment is not repo-local
+- `DEVICE=cuda` to force GPU usage
+- `DQN_OPTIMIZER_UPDATES`, `PG_TOTAL_STEPS`, `A2C_TOTAL_STEPS` to reduce or expand training budgets
+- `SLURM` resource flags can be changed either in the script headers or at submit time with `sbatch --time=... --mem=...`
+
 ## Zhang Alignment Scope
 
 The repo now distinguishes between:

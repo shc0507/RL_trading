@@ -28,6 +28,12 @@ class BacktesterTests(unittest.TestCase):
             self.assertFalse(report.symbol_metrics.empty)
             self.assertFalse(report.daily_returns.empty)
             self.assertFalse(report.trade_log.empty)
+            self.assertIn("portfolio_cumulative_trade_return", report.daily_returns.columns)
+            self.assertIn("trade_return", report.trade_log.columns)
+            self.assertAlmostEqual(
+                float(report.portfolio_metrics["avg_daily_turnover"]),
+                float(report.daily_returns["avg_turnover"].mean()),
+            )
 
 
 if __name__ == "__main__":

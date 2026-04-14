@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--artifact-dir", required=True, help="Path to the run's rl artifact directory.")
     parser.add_argument("--split", default="test")
     parser.add_argument("--style", choices=("legacy", "zhang"), default="zhang")
-    parser.add_argument("--return-column", default="zhang_return")
+    parser.add_argument("--return-column", default="trade_return")
     parser.add_argument("--target-vol", type=float, default=None)
     parser.add_argument(
         "--robust-ylim",

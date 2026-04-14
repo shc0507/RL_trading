@@ -19,6 +19,8 @@ def activation_from_name(name: str) -> nn.Module:
     normalized = name.lower()
     if normalized == "relu":
         return nn.ReLU()
+    if normalized in {"leaky_relu", "leaky-relu"}:
+        return nn.LeakyReLU(negative_slope=0.01)
     if normalized == "tanh":
         return nn.Tanh()
     if normalized == "gelu":
@@ -31,12 +33,15 @@ def build_mlp(
     output_size: int,
     hidden_sizes: Sequence[int],
     activation: str = "relu",
+    dropout: float = 0.0,
 ) -> nn.Sequential:
     layers: list[nn.Module] = []
     current_size = input_size
     for hidden_size in hidden_sizes:
         layers.append(nn.Linear(current_size, int(hidden_size)))
         layers.append(activation_from_name(activation))
+        if float(dropout) > 0.0:
+            layers.append(nn.Dropout(float(dropout)))
         current_size = int(hidden_size)
     layers.append(nn.Linear(current_size, output_size))
     return nn.Sequential(*layers)
