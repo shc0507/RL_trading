@@ -50,7 +50,7 @@ def compute_metrics(daily_rewards: np.ndarray) -> dict[str, float]:
 
     calmar = er / mdd if mdd > 1e-10 else 0.0
 
-    pct_pos = (r > 0).sum() / n * 100
+    pct_pos = (r > 0).sum() / n
 
     pos = r[r > 0]
     neg_abs = r[r < 0]

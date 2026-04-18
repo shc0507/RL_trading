@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from rl_trading.networks import A2CNetwork, DQNNetwork, PGNetwork
@@ -21,7 +22,7 @@ class DQNAgent:
 
     def __init__(
         self,
-        n_features: int = 10,
+        n_features: int = 11,
         lr: float = 1e-4,
         gamma: float = 0.3,
         batch_size: int = 64,
@@ -114,7 +115,7 @@ class PGAgent:
 
     def __init__(
         self,
-        n_features: int = 10,
+        n_features: int = 11,
         lr: float = 1e-4,
         gamma: float = 0.3,
         device: str = "cpu",
@@ -133,9 +134,10 @@ class PGAgent:
     def select_action(self, state: np.ndarray, training: bool = True) -> int:
         with torch.no_grad():
             t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            probs = self.net(t).squeeze(0)
+            logits = self.net(t).squeeze(0)
+            probs = torch.softmax(logits, dim=-1)
         if training:
-            action = torch.multinomial(probs, 1).item()
+            action = int(torch.multinomial(probs, 1).item())
         else:
             action = int(probs.argmax().item())
         return action
@@ -160,14 +162,13 @@ class PGAgent:
 
         # Baseline: subtract mean
         returns = returns - returns.mean()
-        if returns.std() > 1e-8:
-            returns = returns / returns.std()
 
         s = torch.tensor(np.array(self.states), dtype=torch.float32, device=self.device)
         a = torch.tensor(self.actions, dtype=torch.long, device=self.device)
 
-        probs = self.net(s)
-        log_probs = torch.log(probs.gather(1, a.unsqueeze(1)).squeeze(1) + 1e-8)
+        logits = self.net(s)
+        log_probs = F.log_softmax(logits, dim=-1)
+        log_probs = log_probs.gather(1, a.unsqueeze(1)).squeeze(1)
         loss = -(log_probs * returns).mean()
 
         self.optimizer.zero_grad()
@@ -195,28 +196,24 @@ class A2CAgent:
 
     def __init__(
         self,
-        n_features: int = 10,
-        lr_actor: float = 1e-3,
-        lr_critic: float = 1e-4,
+        n_features: int = 11,
+        lr_actor: float = 1e-4,
+        lr_critic: float = 1e-3,
         batch_size: int = 128,
         gamma: float = 0.3,
-        std: float = 0.2,
         device: str = "cpu",
     ):
         self.device = torch.device(device)
         self.gamma = gamma
         self.batch_size = batch_size
-        self.std = std
 
         self.net = A2CNetwork(n_features).to(self.device)
-        self.opt_actor = optim.Adam(
-            list(self.net.encoder.parameters()) + list(self.net.actor.parameters()),
-            lr=lr_actor,
-        )
-        self.opt_critic = optim.Adam(
-            list(self.net.encoder.parameters()) + list(self.net.critic.parameters()),
-            lr=lr_critic,
-        )
+        self.optimizer = optim.Adam([
+            {"params": self.net.encoder.parameters(), "lr": lr_actor},
+            {"params": list(self.net.actor.parameters()) + [self.net.log_std],
+             "lr": lr_actor},
+            {"params": self.net.critic.parameters(), "lr": lr_critic},
+        ])
 
         # Step buffer
         self.states: list = []
@@ -228,10 +225,11 @@ class A2CAgent:
     def select_action(self, state: np.ndarray, training: bool = True) -> float:
         with torch.no_grad():
             t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            mean, _ = self.net(t)
+            mean, _, log_std = self.net(t)
             mean = mean.item()
+            std = log_std.exp().item()
         if training:
-            action = np.clip(np.random.normal(mean, self.std), -1.0, 1.0)
+            action = np.clip(np.random.normal(mean, std), -1.0, 1.0)
         else:
             action = mean
         return float(action)
@@ -253,26 +251,25 @@ class A2CAgent:
         ns = torch.tensor(np.array(self.next_states), dtype=torch.float32, device=self.device)
         d = torch.tensor(self.dones, dtype=torch.float32, device=self.device)
 
-        mean, value = self.net(s)
+        mean, value, log_std = self.net(s)
+        std = log_std.exp()
         with torch.no_grad():
-            _, next_value = self.net(ns)
+            _, next_value, _ = self.net(ns)
             td_target = r + self.gamma * next_value * (1 - d)
         advantage = (td_target - value).detach()
 
         # Critic loss
         critic_loss = nn.functional.mse_loss(value, td_target)
-        self.opt_critic.zero_grad()
-        critic_loss.backward()
-        self.opt_critic.step()
 
         # Actor loss (Gaussian log prob)
-        mean, _ = self.net(s)  # recompute after critic update
-        dist = torch.distributions.Normal(mean, self.std)
+        dist = torch.distributions.Normal(mean, std)
         log_prob = dist.log_prob(a)
         actor_loss = -(log_prob * advantage).mean()
-        self.opt_actor.zero_grad()
-        actor_loss.backward()
-        self.opt_actor.step()
+
+        # Single backward + step to avoid conflicting encoder updates
+        self.optimizer.zero_grad()
+        (critic_loss + actor_loss).backward()
+        self.optimizer.step()
 
         # Clear buffer
         self.states.clear()

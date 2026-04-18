@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from rl_trading.data import fetch_bars
-from rl_trading.env import EnvConfig, TradingEnv
+from rl_trading.env import EnvConfig, STATE_DIM, TradingEnv
 from rl_trading.features import FEATURE_COLS, FeatureBuilder
 
 
@@ -95,7 +95,7 @@ def smoke_rl() -> None:
     print("DQN smoke test")
     print("=" * 60)
     env_d = TradingEnv(feat, EnvConfig(action_mode="discrete", seq_len=60))
-    dqn = DQNAgent(n_features=10)
+    dqn = DQNAgent(n_features=STATE_DIM)
     trainer = Trainer(dqn, env_d, "SPY", tcfg)
     result = trainer.train()
     print(f"DQN result: {result}")
@@ -105,7 +105,7 @@ def smoke_rl() -> None:
     print("PG (REINFORCE) smoke test")
     print("=" * 60)
     env_p = TradingEnv(feat, EnvConfig(action_mode="discrete", seq_len=60))
-    pg = PGAgent(n_features=10)
+    pg = PGAgent(n_features=STATE_DIM)
     trainer = Trainer(pg, env_p, "SPY", tcfg)
     result = trainer.train()
     print(f"PG result: {result}")
@@ -115,7 +115,7 @@ def smoke_rl() -> None:
     print("A2C smoke test")
     print("=" * 60)
     env_a = TradingEnv(feat, EnvConfig(action_mode="continuous", seq_len=60))
-    a2c = A2CAgent(n_features=10)
+    a2c = A2CAgent(n_features=STATE_DIM)
     trainer = Trainer(a2c, env_a, "SPY", tcfg)
     result = trainer.train()
     print(f"A2C result: {result}")
