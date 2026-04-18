@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import random as _random
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -18,21 +19,28 @@ class TrainerConfig:
     patience: int = 20
     eval_every: int = 1
     checkpoint_dir: str = "checkpoints"
+    train_dates: tuple[str, str] | None = None  # override default split dates
+    val_dates: tuple[str, str] | None = None
 
 
 class Trainer:
-    """Train an RL agent on a single symbol."""
+    """Train an RL agent on one or more symbols."""
 
     def __init__(
         self,
         agent: DQNAgent | PGAgent | A2CAgent,
         env: TradingEnv,
-        symbol: str,
+        symbols: list[str] | str,
         cfg: TrainerConfig | None = None,
+        label: str | None = None,
     ):
         self.agent = agent
         self.env = env
-        self.symbol = symbol
+        if isinstance(symbols, str):
+            self.symbols = [symbols]
+        else:
+            self.symbols = list(symbols)
+        self.label = label or self.symbols[0]
         self.cfg = cfg or TrainerConfig()
         self._ckpt_dir = Path(self.cfg.checkpoint_dir)
         self._ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -44,23 +52,32 @@ class Trainer:
         wait = 0
 
         for epoch in range(1, self.cfg.n_epochs + 1):
-            train_metrics = self._run_episode("train", train=True)
+            # Train one episode per symbol (shuffled to avoid order effects)
+            train_syms = list(self.symbols)
+            _random.shuffle(train_syms)
+            train_rewards = []
+            for sym in train_syms:
+                m = self._run_episode(sym, "train", train=True)
+                train_rewards.append(m["total_reward"])
 
             if epoch % self.cfg.eval_every == 0:
-                val_metrics = self._run_episode("val", train=False)
-                val_sharpe = val_metrics["sharpe"]
+                val_sharpes = []
+                for sym in self.symbols:
+                    m = self._run_episode(sym, "val", train=False)
+                    val_sharpes.append(m["sharpe"])
+                val_sharpe = float(np.mean(val_sharpes))
 
                 print(
                     f"Epoch {epoch:3d} | "
-                    f"train reward={train_metrics['total_reward']:+.4f} sharpe={train_metrics['sharpe']:+.3f} | "
-                    f"val reward={val_metrics['total_reward']:+.4f} sharpe={val_metrics['sharpe']:+.3f}"
+                    f"train reward={np.mean(train_rewards):+.4f} | "
+                    f"val sharpe={val_sharpe:+.3f}"
                 )
 
                 if val_sharpe > best_sharpe:
                     best_sharpe = val_sharpe
                     best_epoch = epoch
                     wait = 0
-                    self.agent.save(self._ckpt_dir / f"{self.symbol}_best.pt")
+                    self.agent.save(self._ckpt_dir / f"{self.label}_best.pt")
                 else:
                     wait += 1
                     if wait >= self.cfg.patience:
@@ -69,19 +86,24 @@ class Trainer:
 
         return {"best_epoch": best_epoch, "best_val_sharpe": best_sharpe}
 
-    def _run_episode(self, split: str, train: bool = True) -> dict:
+    def _run_episode(self, symbol: str, split: str, train: bool = True) -> dict:
         """Run one full episode on the given split."""
-        state = self.env.reset(self.symbol, split)
+        # Use custom dates if configured, otherwise fall back to named split
+        if split == "train" and self.cfg.train_dates:
+            state = self.env.reset(symbol, start=self.cfg.train_dates[0],
+                                   end=self.cfg.train_dates[1])
+        elif split == "val" and self.cfg.val_dates:
+            state = self.env.reset(symbol, start=self.cfg.val_dates[0],
+                                   end=self.cfg.val_dates[1])
+        else:
+            state = self.env.reset(symbol, split)
+
         rewards: list[float] = []
         losses: list[float] = []
         done = False
 
-        # For A2C: need to track last state for terminal handling
         while not done:
-            if isinstance(self.agent, A2CAgent):
-                action = self.agent.select_action(state, training=train)
-            elif isinstance(self.agent, (DQNAgent, PGAgent)):
-                action = self.agent.select_action(state, training=train)
+            action = self.agent.select_action(state, training=train)
 
             next_state, reward, done, info = self.env.step(action)
             rewards.append(reward)
@@ -112,15 +134,13 @@ class Trainer:
             loss = self.agent.train_episode()
             losses.append(loss)
 
-        # Flush remaining A2C buffer at episode end
+        # Drop leftover A2C buffer at episode end
         if train and isinstance(self.agent, A2CAgent) and len(self.agent.states) > 0:
-            # Force train with whatever is left
-            orig_bs = self.agent.batch_size
-            self.agent.batch_size = 1
-            loss = self.agent.train_step()
-            self.agent.batch_size = orig_bs
-            if loss is not None:
-                losses.append(loss)
+            self.agent.states.clear()
+            self.agent.actions.clear()
+            self.agent.rewards.clear()
+            self.agent.next_states.clear()
+            self.agent.dones.clear()
 
         return {
             "total_reward": sum(rewards),

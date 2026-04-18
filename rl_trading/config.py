@@ -76,3 +76,36 @@ UNIVERSE: list[dict[str, str]] = [
     {"symbol": "CYB", "asset_class": "fx"},
     {"symbol": "CEW", "asset_class": "fx"},
 ]
+
+
+def walk_forward_splits(
+    data_start: str = TRAIN_START,
+    data_end: str = TEST_END,
+    min_train_years: int = 5,
+    val_years: int = 3,
+    test_years: int = 3,
+) -> list[dict[str, tuple[str, str]]]:
+    """Generate expanding-window walk-forward folds.
+
+    Each fold has an expanding training window (always starts at data_start),
+    a fixed-length validation window, and a fixed-length test window.
+    """
+    start_year = int(data_start[:4])
+    end_year = int(data_end[:4])
+
+    folds: list[dict[str, tuple[str, str]]] = []
+    test_start_year = start_year + min_train_years + val_years
+
+    while test_start_year <= end_year:
+        test_end_year = min(test_start_year + test_years - 1, end_year)
+        val_start_year = test_start_year - val_years
+        train_end_year = val_start_year - 1
+
+        folds.append({
+            "train": (data_start, f"{train_end_year}-12-31"),
+            "val": (f"{val_start_year}-01-01", f"{val_start_year + val_years - 1}-12-31"),
+            "test": (f"{test_start_year}-01-01", f"{test_end_year}-12-31"),
+        })
+        test_start_year += test_years
+
+    return folds
