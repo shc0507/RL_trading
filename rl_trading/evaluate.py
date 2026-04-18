@@ -38,6 +38,7 @@ from rl_trading.env import EnvConfig, STATE_DIM, TradingEnv
 from rl_trading.features import FeatureBuilder
 from rl_trading.metrics import compute_metrics
 from rl_trading.trainer import Trainer, TrainerConfig
+from rl_trading.wandb_logger import WandbLogger
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -73,6 +74,29 @@ _BASELINE_FNS = {
     "Sign(R)": sign_r,
     "MACD": macd_signal,
 }
+
+
+def _extract_hparams(agent, env_cfg) -> dict:
+    """Introspect an agent instance for its hyperparameters."""
+    h: dict = {}
+    for key in (
+        "gamma", "batch_size", "target_update_freq",
+        "eps_start", "eps_end", "eps_decay_steps",
+    ):
+        if hasattr(agent, key):
+            h[key] = getattr(agent, key)
+    if hasattr(agent, "memory") and hasattr(agent.memory, "maxlen"):
+        h["memory_size"] = agent.memory.maxlen
+    if hasattr(agent, "optimizer"):
+        lrs = [pg.get("lr") for pg in agent.optimizer.param_groups]
+        h["lr"] = lrs[0] if len(set(lrs)) == 1 else lrs
+    h["env"] = {
+        "action_mode": env_cfg.action_mode,
+        "cost_rate_bp": env_cfg.cost_rate_bp,
+        "vol_target": env_cfg.vol_target,
+        "seq_len": env_cfg.seq_len,
+    }
+    return h
 
 
 def _collect_rl_rewards(
@@ -140,6 +164,11 @@ def run_experiment(
     output_dir: str = "artifacts",
     device: str | None = None,
     walk_forward: bool = False,
+    wandb_enabled: bool = False,
+    wandb_project: str = "rl-trading",
+    wandb_entity: str | None = None,
+    wandb_name: str | None = None,
+    wandb_tags: list[str] | None = None,
 ):
     """Run the full Zhang et al. experiment.
 
@@ -201,6 +230,34 @@ def run_experiment(
             "test": (TEST_START, TEST_END),
         }]
 
+    # Initialize wandb (no-op if disabled)
+    agent_hparams: dict[str, dict] = {}
+    for agent_name in agents:
+        a, env_cfg = agent_factories[agent_name]()
+        agent_hparams[agent_name] = _extract_hparams(a, env_cfg)
+    wandb_config = {
+        "agents": agents,
+        "n_epochs": n_epochs,
+        "patience": patience,
+        "device": device,
+        "walk_forward": walk_forward,
+        "symbols": all_symbols,
+        "asset_classes": dict(class_symbols),
+        "folds": [
+            {k: list(v) for k, v in fold.items()} for fold in folds
+        ],
+        "default_vol_target": DEFAULT_VOL_TARGET,
+        "hparams": agent_hparams,
+    }
+    logger = WandbLogger.init(
+        enabled=wandb_enabled,
+        project=wandb_project,
+        entity=wandb_entity,
+        name=wandb_name,
+        tags=wandb_tags,
+        config=wandb_config,
+    )
+
     method_names = list(_BASELINE_FNS.keys()) + [a.upper() for a in agents]
     results: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
     failures: list[tuple[str, str, str]] = []
@@ -251,7 +308,11 @@ def run_experiment(
                         train_dates=train_dates,
                         val_dates=val_dates,
                     )
-                    trainer = Trainer(agent, env, class_syms, tcfg, label=cls)
+                    ctx = f"{agent_name}/{cls}/fold{fold_idx}"
+                    trainer = Trainer(
+                        agent, env, class_syms, tcfg, label=cls,
+                        logger=logger, context=ctx,
+                    )
                     train_result = trainer.train()
                     print(f"  {cls}/{label}: {train_result}")
 
@@ -342,7 +403,18 @@ def run_experiment(
     print(f"\nResults saved to {csv_path}")
 
     # 8. Plot cumulative trade returns
-    _plot_cumulative(portfolio_rewards, groupings, method_names, out_dir)
+    fig = _plot_cumulative(portfolio_rewards, groupings, method_names, out_dir)
+
+    # 9. Final wandb artifacts
+    if logger is not None:
+        try:
+            logger.log_table("final/metrics_table", metrics_df)
+            logger.log_image("final/cumulative_returns", fig)
+        finally:
+            plt.close(fig)
+            logger.finish()
+    else:
+        plt.close(fig)
 
     return metrics_df
 
@@ -369,7 +441,7 @@ def _plot_cumulative(
     groupings: dict[str, list[str]],
     method_names: list[str],
     out_dir: Path,
-) -> None:
+):
     """Plot cumulative trade returns (Zhang Exhibit 3 style)."""
     grp_names = list(groupings.keys())
     n = len(grp_names)
@@ -393,5 +465,5 @@ def _plot_cumulative(
     fig.tight_layout()
     png_path = out_dir / "cumulative_returns.png"
     fig.savefig(png_path, dpi=120)
-    plt.close(fig)
     print(f"Plot saved to {png_path}")
+    return fig

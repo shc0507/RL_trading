@@ -204,6 +204,7 @@ cython_debug/
 # Project outputs
 artifacts/
 smoke_features.png
+wandb/
 
 # Local workspace noise
 .DS_Store

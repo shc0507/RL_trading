@@ -11,6 +11,7 @@ import numpy as np
 
 from rl_trading.agents import A2CAgent, DQNAgent, PGAgent
 from rl_trading.env import TradingEnv
+from rl_trading.wandb_logger import WandbLogger
 
 
 @dataclass
@@ -33,6 +34,8 @@ class Trainer:
         symbols: list[str] | str,
         cfg: TrainerConfig | None = None,
         label: str | None = None,
+        logger: WandbLogger | None = None,
+        context: str | None = None,
     ):
         self.agent = agent
         self.env = env
@@ -44,6 +47,10 @@ class Trainer:
         self.cfg = cfg or TrainerConfig()
         self._ckpt_dir = Path(self.cfg.checkpoint_dir)
         self._ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = logger
+        self.context = context
+        if self.logger is not None and self.context is not None:
+            self.logger.define_context(self.context)
 
     def train(self) -> dict:
         """Run full training loop. Returns dict with best metrics."""
@@ -56,15 +63,24 @@ class Trainer:
             train_syms = list(self.symbols)
             _random.shuffle(train_syms)
             train_rewards = []
+            train_sharpes = []
+            train_losses = []
+            agent_stats_acc: dict[str, list[float]] = {}
             for sym in train_syms:
                 m = self._run_episode(sym, "train", train=True)
                 train_rewards.append(m["total_reward"])
+                train_sharpes.append(m["sharpe"])
+                train_losses.append(m["mean_loss"])
+                for k, v in m.get("agent_stats", {}).items():
+                    agent_stats_acc.setdefault(k, []).append(v)
 
             if epoch % self.cfg.eval_every == 0:
                 val_sharpes = []
+                val_rewards = []
                 for sym in self.symbols:
                     m = self._run_episode(sym, "val", train=False)
                     val_sharpes.append(m["sharpe"])
+                    val_rewards.append(m["total_reward"])
                 val_sharpe = float(np.mean(val_sharpes))
 
                 print(
@@ -80,9 +96,27 @@ class Trainer:
                     self.agent.save(self._ckpt_dir / f"{self.label}_best.pt")
                 else:
                     wait += 1
-                    if wait >= self.cfg.patience:
-                        print(f"Early stopping at epoch {epoch} (best={best_epoch})")
-                        break
+
+                if self.logger is not None and self.context is not None:
+                    payload: dict[str, float] = {
+                        "train/reward_mean": float(np.mean(train_rewards)),
+                        "train/reward_sum": float(np.sum(train_rewards)),
+                        "train/sharpe": float(np.mean(train_sharpes)),
+                        "train/loss": float(np.mean(train_losses)),
+                        "val/sharpe": val_sharpe,
+                        "val/reward_mean": float(np.mean(val_rewards)),
+                        "best/val_sharpe": float(best_sharpe),
+                        "best/epoch": float(best_epoch),
+                        "early_stop/wait": float(wait),
+                    }
+                    for k, vs in agent_stats_acc.items():
+                        if vs:
+                            payload[f"agent/{k}"] = float(np.mean(vs))
+                    self.logger.log(payload, ctx=self.context, epoch=epoch)
+
+                if wait >= self.cfg.patience:
+                    print(f"Early stopping at epoch {epoch} (best={best_epoch})")
+                    break
 
         return {"best_epoch": best_epoch, "best_val_sharpe": best_sharpe}
 
@@ -100,6 +134,7 @@ class Trainer:
 
         rewards: list[float] = []
         losses: list[float] = []
+        stats_snapshots: list[dict[str, float]] = []
         done = False
 
         while not done:
@@ -115,6 +150,7 @@ class Trainer:
                     loss = self.agent.train_step()
                     if loss is not None:
                         losses.append(loss)
+                        stats_snapshots.append(dict(self.agent.last_stats))
 
                 elif isinstance(self.agent, PGAgent):
                     self.agent.store(state, action, reward)
@@ -125,6 +161,7 @@ class Trainer:
                     loss = self.agent.train_step()
                     if loss is not None:
                         losses.append(loss)
+                        stats_snapshots.append(dict(self.agent.last_stats))
 
             if next_state is not None:
                 state = next_state
@@ -133,6 +170,7 @@ class Trainer:
         if train and isinstance(self.agent, PGAgent):
             loss = self.agent.train_episode()
             losses.append(loss)
+            stats_snapshots.append(dict(self.agent.last_stats))
 
         # Drop leftover A2C buffer at episode end
         if train and isinstance(self.agent, A2CAgent) and len(self.agent.states) > 0:
@@ -142,12 +180,19 @@ class Trainer:
             self.agent.next_states.clear()
             self.agent.dones.clear()
 
+        agent_stats: dict[str, float] = {}
+        if stats_snapshots:
+            keys = stats_snapshots[0].keys()
+            for k in keys:
+                agent_stats[k] = float(np.mean([s[k] for s in stats_snapshots if k in s]))
+
         return {
             "total_reward": sum(rewards),
             "mean_reward": np.mean(rewards) if rewards else 0.0,
             "sharpe": self._compute_sharpe(rewards),
             "mean_loss": np.mean(losses) if losses else 0.0,
             "n_steps": len(rewards),
+            "agent_stats": agent_stats,
         }
 
     @staticmethod

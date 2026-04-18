@@ -49,6 +49,7 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.online.parameters(), lr=lr)
         self.memory: deque = deque(maxlen=memory_size)
         self.step_count = 0
+        self.last_stats: dict[str, float] = {}
 
     @property
     def epsilon(self) -> float:
@@ -95,6 +96,13 @@ class DQNAgent:
         if self.step_count % self.target_update_freq == 0:
             self.update_target()
 
+        self.last_stats = {
+            "loss": loss.item(),
+            "q_mean": q_vals.mean().item(),
+            "td_error": (targets - q_vals).abs().mean().item(),
+            "epsilon": self.epsilon,
+            "replay_size": float(len(self.memory)),
+        }
         return loss.item()
 
     def update_target(self):
@@ -130,6 +138,7 @@ class PGAgent:
         self.states: list = []
         self.actions: list = []
         self.rewards: list = []
+        self.last_stats: dict[str, float] = {}
 
     def select_action(self, state: np.ndarray, training: bool = True) -> int:
         with torch.no_grad():
@@ -167,13 +176,22 @@ class PGAgent:
         a = torch.tensor(self.actions, dtype=torch.long, device=self.device)
 
         logits = self.net(s)
-        log_probs = F.log_softmax(logits, dim=-1)
-        log_probs = log_probs.gather(1, a.unsqueeze(1)).squeeze(1)
+        log_probs_full = F.log_softmax(logits, dim=-1)
+        entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1).mean()
+        log_probs = log_probs_full.gather(1, a.unsqueeze(1)).squeeze(1)
         loss = -(log_probs * returns).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+        self.last_stats = {
+            "loss": loss.item(),
+            "entropy": entropy.item(),
+            "return_mean": float(returns.mean().item()),
+            "return_std": float(returns.std().item()) if returns.numel() > 1 else 0.0,
+            "episode_len": float(len(self.rewards)),
+        }
 
         # Clear buffers
         self.states.clear()
@@ -221,6 +239,7 @@ class A2CAgent:
         self.rewards: list = []
         self.next_states: list = []
         self.dones: list = []
+        self.last_stats: dict[str, float] = {}
 
     def select_action(self, state: np.ndarray, training: bool = True) -> float:
         with torch.no_grad():
@@ -270,6 +289,15 @@ class A2CAgent:
         self.optimizer.zero_grad()
         (critic_loss + actor_loss).backward()
         self.optimizer.step()
+
+        self.last_stats = {
+            "actor_loss": actor_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "advantage_mean": advantage.mean().item(),
+            "advantage_std": advantage.std().item() if advantage.numel() > 1 else 0.0,
+            "value_mean": value.mean().item(),
+            "log_std": log_std.item(),
+        }
 
         # Clear buffer
         self.states.clear()

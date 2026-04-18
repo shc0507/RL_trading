@@ -14,6 +14,11 @@ def main():
     parser.add_argument("--output-dir", default="artifacts", help="Output directory")
     parser.add_argument("--device", default=None, help="Device: cpu, cuda, mps (default: auto-detect)")
     parser.add_argument("--walk-forward", action="store_true", help="Use expanding-window walk-forward folds")
+    parser.add_argument("--wandb", action="store_true", help="Log to Weights & Biases")
+    parser.add_argument("--wandb-project", default="rl-trading", help="wandb project name")
+    parser.add_argument("--wandb-entity", default=None, help="wandb entity (team or user)")
+    parser.add_argument("--wandb-name", default=None, help="wandb run name")
+    parser.add_argument("--wandb-tags", nargs="*", default=None, help="wandb tags")
     args = parser.parse_args()
     run_experiment(
         symbols=args.symbols,
@@ -23,6 +28,11 @@ def main():
         output_dir=args.output_dir,
         device=args.device,
         walk_forward=args.walk_forward,
+        wandb_enabled=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_name=args.wandb_name,
+        wandb_tags=args.wandb_tags,
     )
 
 

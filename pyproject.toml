@@ -13,6 +13,9 @@ dependencies = [
   "yfinance>=0.2",
 ]
 
+[project.optional-dependencies]
+wandb = ["wandb>=0.19"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
