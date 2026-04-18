@@ -205,6 +205,7 @@ cython_debug/
 artifacts/
 smoke_features.png
 wandb/
+logs/
 
 # Local workspace noise
 .DS_Store

@@ -24,30 +24,18 @@ VAL_END = "2018-12-31"
 TEST_START = "2019-01-01"
 TEST_END = "2025-12-31"
 
-# ── Asset universe (~50 tickers) ─────────────────────────────────────
+# ── Asset universe (strict subset of original ETF proxies) ───────────
 UNIVERSE: list[dict[str, str]] = [
-    # Commodities (~25)
+    # Commodities
     {"symbol": "GLD", "asset_class": "commodity"},
     {"symbol": "SLV", "asset_class": "commodity"},
     {"symbol": "USO", "asset_class": "commodity"},
     {"symbol": "UNG", "asset_class": "commodity"},
-    {"symbol": "CORN", "asset_class": "commodity"},
-    {"symbol": "SOYB", "asset_class": "commodity"},
-    {"symbol": "WEAT", "asset_class": "commodity"},
     {"symbol": "DBA", "asset_class": "commodity"},
     {"symbol": "DBC", "asset_class": "commodity"},
-    {"symbol": "CPER", "asset_class": "commodity"},
-    {"symbol": "PALL", "asset_class": "commodity"},
-    {"symbol": "PPLT", "asset_class": "commodity"},
-    {"symbol": "JO", "asset_class": "commodity"},
-    {"symbol": "NIB", "asset_class": "commodity"},
-    {"symbol": "SGG", "asset_class": "commodity"},
-    {"symbol": "COW", "asset_class": "commodity"},
     {"symbol": "UGA", "asset_class": "commodity"},
-    {"symbol": "BNO", "asset_class": "commodity"},
-    {"symbol": "PDBC", "asset_class": "commodity"},
     {"symbol": "GSG", "asset_class": "commodity"},
-    # Equity Indexes (~11)
+    # Equity Indexes
     {"symbol": "SPY", "asset_class": "equity_index"},
     {"symbol": "QQQ", "asset_class": "equity_index"},
     {"symbol": "IWM", "asset_class": "equity_index"},
@@ -73,8 +61,6 @@ UNIVERSE: list[dict[str, str]] = [
     {"symbol": "FXY", "asset_class": "fx"},
     {"symbol": "FXF", "asset_class": "fx"},
     {"symbol": "UUP", "asset_class": "fx"},
-    {"symbol": "CYB", "asset_class": "fx"},
-    {"symbol": "CEW", "asset_class": "fx"},
 ]
 
 

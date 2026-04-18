@@ -19,6 +19,11 @@ def main():
     parser.add_argument("--wandb-entity", default=None, help="wandb entity (team or user)")
     parser.add_argument("--wandb-name", default=None, help="wandb run name")
     parser.add_argument("--wandb-tags", nargs="*", default=None, help="wandb tags")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Inspect stable-universe data coverage and exit before training",
+    )
     args = parser.parse_args()
     run_experiment(
         symbols=args.symbols,
@@ -33,6 +38,7 @@ def main():
         wandb_entity=args.wandb_entity,
         wandb_name=args.wandb_name,
         wandb_tags=args.wandb_tags,
+        preflight_only=args.preflight,
     )
 
 

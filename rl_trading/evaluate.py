@@ -75,6 +75,8 @@ _BASELINE_FNS = {
     "MACD": macd_signal,
 }
 
+_MAX_PORTFOLIO_SCALE: float = 10.0
+
 
 def _extract_hparams(agent, env_cfg) -> dict:
     """Introspect an agent instance for its hyperparameters."""
@@ -164,8 +166,10 @@ def _portfolio_vol_scale(
         return port_returns
     cum_std = pd.Series(port_returns).expanding(min_periods=60).std() * math.sqrt(252)
     cum_std = cum_std.shift(1).to_numpy().copy()
-    cum_std[np.isnan(cum_std) | (cum_std < 1e-8)] = 1e-8
-    scale = vol_target / cum_std
+    min_portfolio_vol = vol_target / _MAX_PORTFOLIO_SCALE
+    effective_vol = np.where(np.isnan(cum_std), min_portfolio_vol, cum_std)
+    effective_vol = np.maximum(effective_vol, vol_target / _MAX_PORTFOLIO_SCALE)
+    scale = np.minimum(vol_target / effective_vol, _MAX_PORTFOLIO_SCALE)
     scale[:60] = 1.0
     return port_returns * scale
 
@@ -208,6 +212,95 @@ def _append_rewards(
         results[sym][method] = rewards
 
 
+def _count_window_ready_rows(
+    feature_frame: pd.DataFrame,
+    symbol: str,
+    start: str,
+    end: str,
+) -> int:
+    mask = (
+        (feature_frame["symbol"] == symbol)
+        & (feature_frame["window_ready"])
+        & (feature_frame["date"] >= start)
+        & (feature_frame["date"] <= end)
+    )
+    return int(mask.sum())
+
+
+def _filter_full_history_universe(
+    universe: list[dict[str, str]],
+    feature_frame: pd.DataFrame,
+    folds: list[dict[str, tuple[str, str]]],
+    min_rows: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str | int]]]:
+    """Keep only symbols that can support every fold and split."""
+    eligible: list[dict[str, str]] = []
+    exclusions: list[dict[str, str | int]] = []
+
+    for entry in universe:
+        symbol = entry["symbol"]
+        exclusion: dict[str, str | int] | None = None
+        for fold_idx, fold in enumerate(folds, 1):
+            for split_name in ("train", "val", "test"):
+                start, end = fold[split_name]
+                rows = _count_window_ready_rows(feature_frame, symbol, start, end)
+                if rows < min_rows:
+                    exclusion = {
+                        "symbol": symbol,
+                        "asset_class": entry["asset_class"],
+                        "fold_idx": fold_idx,
+                        "split": split_name,
+                        "rows": rows,
+                        "min_rows": min_rows,
+                        "start": start,
+                        "end": end,
+                    }
+                    break
+            if exclusion is not None:
+                break
+        if exclusion is None:
+            eligible.append(entry)
+        else:
+            exclusions.append(exclusion)
+
+    return eligible, exclusions
+
+
+def _print_universe_summary(
+    requested_symbols: list[str],
+    eligible_universe: list[dict[str, str]],
+    exclusions: list[dict[str, str | int]],
+    min_rows: int,
+) -> None:
+    print(
+        f"Eligible stable universe: {len(eligible_universe)}/{len(requested_symbols)} "
+        f"symbols (requires >= {min_rows} window-ready rows per fold split)"
+    )
+    if not exclusions:
+        return
+    print("Excluded symbols:")
+    for item in exclusions:
+        print(
+            f"  {item['symbol']} ({item['asset_class']}): fold {item['fold_idx']} "
+            f"{item['split']} has {item['rows']} rows in "
+            f"{item['start']}–{item['end']}; need >= {item['min_rows']}"
+        )
+
+
+def _print_failures(
+    failures: list[tuple[str, str, str]],
+    *,
+    label: str,
+) -> None:
+    print(f"\n{'!'*60}")
+    print(f"  {label}: {len(failures)} runs failed")
+    print(f"{'!'*60}")
+    for scope, method, tb in failures:
+        print(f"\n  [{scope} / {method}]")
+        print(tb)
+    print(f"{'!'*60}\n")
+
+
 # ── Main experiment ─────────────────────────────────────────────────
 
 def run_experiment(
@@ -223,6 +316,7 @@ def run_experiment(
     wandb_entity: str | None = None,
     wandb_name: str | None = None,
     wandb_tags: list[str] | None = None,
+    preflight_only: bool = False,
 ):
     """Run the full Zhang et al. experiment.
 
@@ -255,21 +349,15 @@ def run_experiment(
         sym_set = set(symbols)
         universe = [u for u in UNIVERSE if u["symbol"] in sym_set]
 
-    all_symbols = [u["symbol"] for u in universe]
-    sym_to_class = {u["symbol"]: u["asset_class"] for u in universe}
+    requested_symbols = [u["symbol"] for u in universe]
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Group symbols by asset class
-    class_symbols: dict[str, list[str]] = defaultdict(list)
-    for sym in all_symbols:
-        class_symbols[sym_to_class[sym]].append(sym)
-
     # 1. Fetch data and build features
     print("Fetching data ...")
     fetch_start = str(int(TRAIN_START[:4]) - 2) + TRAIN_START[4:]
-    bars = fetch_bars(all_symbols, start=fetch_start, end=TEST_END)
+    bars = fetch_bars(requested_symbols, start=fetch_start, end=TEST_END)
     print("Building features ...")
     fb = FeatureBuilder()
     feat = fb.transform(bars)
@@ -284,18 +372,55 @@ def run_experiment(
             "test": (TEST_START, TEST_END),
         }]
 
-    # Initialize wandb (no-op if disabled)
+    # Resolve agent metadata up front so eligibility filtering can respect
+    # the longest state sequence required by any configured agent.
     agent_hparams: dict[str, dict] = {}
+    min_history_rows = 2
     for agent_name in agents:
         a, env_cfg = agent_factories[agent_name]()
         agent_hparams[agent_name] = _extract_hparams(a, env_cfg)
+        min_history_rows = max(min_history_rows, env_cfg.seq_len + 1)
+
+    universe, exclusions = _filter_full_history_universe(
+        universe,
+        feat,
+        folds,
+        min_rows=min_history_rows,
+    )
+    if not universe:
+        raise ValueError(
+            "No eligible symbols remain after full-history filtering. "
+            "Reduce the requested universe or shorten the walk-forward horizon."
+        )
+
+    _print_universe_summary(requested_symbols, universe, exclusions, min_history_rows)
+
+    all_symbols = [u["symbol"] for u in universe]
+    if len(all_symbols) != len(requested_symbols):
+        feat = feat.loc[feat["symbol"].isin(all_symbols)].reset_index(drop=True)
+
+    sym_to_class = {u["symbol"]: u["asset_class"] for u in universe}
+
+    # Group symbols by asset class after filtering so every fold sees one stable universe.
+    class_symbols: dict[str, list[str]] = defaultdict(list)
+    for sym in all_symbols:
+        class_symbols[sym_to_class[sym]].append(sym)
+
+    if preflight_only:
+        print("Preflight only: stopping after stable-universe inspection.")
+        return None
+
+    # Initialize wandb (no-op if disabled)
     wandb_config = {
         "agents": agents,
         "n_epochs": n_epochs,
         "patience": patience,
         "device": device,
         "walk_forward": walk_forward,
+        "requested_symbols": requested_symbols,
         "symbols": all_symbols,
+        "excluded_symbols": [str(item["symbol"]) for item in exclusions],
+        "eligibility_min_rows": min_history_rows,
         "asset_classes": dict(class_symbols),
         "folds": [
             {k: list(v) for k, v in fold.items()} for fold in folds
@@ -315,210 +440,204 @@ def run_experiment(
     method_names = list(_BASELINE_FNS.keys()) + [a.upper() for a in agents]
     results: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
     raw_daily: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
-    failures: list[tuple[str, str, str]] = []
+    fatal_failures: list[tuple[str, str, str]] = []
+    fig = None
+    fig_raw = None
 
-    # 3. Run each fold
-    for fold_idx, fold in enumerate(folds, 1):
-        train_dates = fold["train"]
-        val_dates = fold["val"]
-        test_dates = fold["test"]
+    try:
+        # 3. Run each fold
+        for fold_idx, fold in enumerate(folds, 1):
+            train_dates = fold["train"]
+            val_dates = fold["val"]
+            test_dates = fold["test"]
 
-        if len(folds) > 1:
-            print(f"\n{'#'*60}")
-            print(f"  Fold {fold_idx}/{len(folds)}: "
-                  f"train {train_dates[0]}–{train_dates[1]}, "
-                  f"test {test_dates[0]}–{test_dates[1]}")
-            print(f"{'#'*60}")
+            if len(folds) > 1:
+                print(f"\n{'#'*60}")
+                print(f"  Fold {fold_idx}/{len(folds)}: "
+                      f"train {train_dates[0]}–{train_dates[1]}, "
+                      f"test {test_dates[0]}–{test_dates[1]}")
+                print(f"{'#'*60}")
 
-        # ── Baselines (per-symbol, non-learned) ──
-        print(f"\n  Baselines ...")
-        for sym in all_symbols:
-            for name, fn in _BASELINE_FNS.items():
-                try:
-                    positions = fn(feat, sym, start=test_dates[0], end=test_dates[1])
-                    rewards = compute_baseline_rewards(
-                        positions, feat, sym,
-                        start=test_dates[0], end=test_dates[1],
-                    )
-                    _append_rewards(results, sym, name, rewards)
-                    frac = _baseline_frac_daily(
-                        feat, sym, fn, test_dates[0], test_dates[1],
-                    )
-                    _append_rewards(raw_daily, sym, name, frac)
-                except Exception as e:
-                    failures.append((sym, name, traceback.format_exc()))
-        baseline_syms = sum(1 for s in all_symbols
-                           if "Long" in results[s] and len(results[s]["Long"]) > 0)
-        print(f"  Baselines: {baseline_syms}/{len(all_symbols)} symbols OK")
+            # ── Baselines (per-symbol, non-learned) ──
+            print(f"\n  Baselines ...")
+            for sym in all_symbols:
+                for name, fn in _BASELINE_FNS.items():
+                    try:
+                        positions = fn(feat, sym, start=test_dates[0], end=test_dates[1])
+                        rewards = compute_baseline_rewards(
+                            positions, feat, sym,
+                            start=test_dates[0], end=test_dates[1],
+                        )
+                        _append_rewards(results, sym, name, rewards)
+                        frac = _baseline_frac_daily(
+                            feat, sym, fn, test_dates[0], test_dates[1],
+                        )
+                        _append_rewards(raw_daily, sym, name, frac)
+                    except Exception:
+                        fatal_failures.append((sym, name, traceback.format_exc()))
+            baseline_syms = sum(1 for s in all_symbols
+                               if "Long" in results[s] and len(results[s]["Long"]) > 0)
+            print(f"  Baselines: {baseline_syms}/{len(all_symbols)} symbols OK")
 
-        # ── RL agents (one model per asset class) ──
-        for agent_name in agents:
-            label = agent_name.upper()
-            for cls, class_syms in class_symbols.items():
-                print(f"\n  {label} / {cls} ({len(class_syms)} symbols)")
-                try:
-                    agent, env_cfg = agent_factories[agent_name]()
-                    env = TradingEnv(feat, env_cfg)
-                    fold_label = f"{cls}_fold{fold_idx}" if len(folds) > 1 else cls
-                    tcfg = TrainerConfig(
-                        n_epochs=n_epochs,
-                        patience=patience,
-                        checkpoint_dir=str(out_dir / "checkpoints" / fold_label),
-                        train_dates=train_dates,
-                        val_dates=val_dates,
-                    )
-                    ctx = f"{agent_name}/{cls}/fold{fold_idx}"
-                    trainer = Trainer(
-                        agent, env, class_syms, tcfg, label=cls,
-                        logger=logger, context=ctx,
-                    )
-                    train_result = trainer.train()
-                    print(f"  {cls}/{label}: {train_result}")
+            # ── RL agents (one model per asset class) ──
+            for agent_name in agents:
+                label = agent_name.upper()
+                for cls, class_syms in class_symbols.items():
+                    print(f"\n  {label} / {cls} ({len(class_syms)} symbols)")
+                    try:
+                        agent, env_cfg = agent_factories[agent_name]()
+                        env = TradingEnv(feat, env_cfg)
+                        fold_label = f"{cls}_fold{fold_idx}" if len(folds) > 1 else cls
+                        tcfg = TrainerConfig(
+                            n_epochs=n_epochs,
+                            patience=patience,
+                            checkpoint_dir=str(out_dir / "checkpoints" / fold_label),
+                            train_dates=train_dates,
+                            val_dates=val_dates,
+                        )
+                        ctx = f"{agent_name}/{cls}/fold{fold_idx}"
+                        trainer = Trainer(
+                            agent, env, class_syms, tcfg, label=cls,
+                            logger=logger, context=ctx,
+                        )
+                        train_result = trainer.train()
+                        print(f"  {cls}/{label}: {train_result}")
 
-                    # Load best checkpoint and evaluate on test
-                    ckpt = Path(tcfg.checkpoint_dir) / f"{cls}_best.pt"
-                    if ckpt.exists():
+                        ckpt = Path(tcfg.checkpoint_dir) / f"{cls}_best.pt"
+                        if not ckpt.exists():
+                            raise FileNotFoundError(f"Missing checkpoint: {ckpt}")
                         agent.load(ckpt)
 
-                    for sym in class_syms:
-                        try:
-                            trade = _collect_rl_test(
-                                agent, feat, sym,
-                                action_mode=env_cfg.action_mode,
-                                seq_len=env_cfg.seq_len,
-                                start=test_dates[0], end=test_dates[1],
-                            )
-                            rewards = pd.Series(
-                                trade["reward"].to_numpy(), index=trade.index,
-                            )
-                            _append_rewards(results, sym, label, rewards)
-                            # Unscaled fractional daily return: w_t · (p_{t+1}/p_t - 1)
-                            simple_r = trade["daily_return"].to_numpy() / trade["price"].to_numpy()
-                            frac = pd.Series(
-                                trade["position"].to_numpy() * simple_r,
-                                index=trade.index,
-                            )
-                            _append_rewards(raw_daily, sym, label, frac)
-                            print(f"    {sym}/{label}: {len(rewards)} days, "
-                                  f"mean={rewards.mean():.6f}")
-                        except Exception as e:
-                            failures.append((sym, label, traceback.format_exc()))
-                except Exception as e:
-                    print(f"  {cls}/{label}: FAILED ({e})")
-                    failures.append((cls, label, traceback.format_exc()))
-                    for sym in class_syms:
-                        if label not in results[sym]:
-                            results[sym][label] = pd.Series(dtype=np.float64)
+                        for sym in class_syms:
+                            try:
+                                trade = _collect_rl_test(
+                                    agent, feat, sym,
+                                    action_mode=env_cfg.action_mode,
+                                    seq_len=env_cfg.seq_len,
+                                    start=test_dates[0], end=test_dates[1],
+                                )
+                                rewards = pd.Series(
+                                    trade["reward"].to_numpy(), index=trade.index,
+                                )
+                                _append_rewards(results, sym, label, rewards)
+                                simple_r = trade["daily_return"].to_numpy() / trade["price"].to_numpy()
+                                frac = pd.Series(
+                                    trade["position"].to_numpy() * simple_r,
+                                    index=trade.index,
+                                )
+                                _append_rewards(raw_daily, sym, label, frac)
+                                print(f"    {sym}/{label}: {len(rewards)} days, "
+                                      f"mean={rewards.mean():.6f}")
+                            except Exception:
+                                fatal_failures.append((sym, label, traceback.format_exc()))
+                    except Exception as exc:
+                        print(f"  {cls}/{label}: FAILED ({exc})")
+                        fatal_failures.append((cls, label, traceback.format_exc()))
 
-    # 4. Report failures
-    if failures:
-        print(f"\n{'!'*60}")
-        print(f"  FAILURES: {len(failures)} method/symbol runs failed")
-        print(f"{'!'*60}")
-        for sym, method, tb in failures:
-            print(f"\n  [{sym} / {method}]")
-            print(tb)
-        print(f"{'!'*60}\n")
+        if fatal_failures:
+            _print_failures(fatal_failures, label="POST-FILTER FAILURES")
+            raise RuntimeError(
+                f"Aborting result generation after {len(fatal_failures)} post-filter failures."
+            )
 
-    # 5. Aggregate portfolios
-    print(f"\n{'='*60}")
-    print("Aggregating portfolios ...")
-    print(f"{'='*60}")
+        # 5. Aggregate portfolios
+        print(f"\n{'='*60}")
+        print("Aggregating portfolios ...")
+        print(f"{'='*60}")
 
-    groupings: dict[str, list[str]] = dict(class_symbols)
-    groupings["All"] = all_symbols
+        groupings: dict[str, list[str]] = dict(class_symbols)
+        groupings["All"] = all_symbols
 
-    portfolio_rewards: dict[str, dict[str, pd.Series]] = {}
-    portfolio_raw: dict[str, dict[str, pd.Series]] = {}
+        portfolio_rewards: dict[str, dict[str, pd.Series]] = {}
+        portfolio_raw: dict[str, dict[str, pd.Series]] = {}
 
-    for grp_name, grp_syms in groupings.items():
-        portfolio_rewards[grp_name] = {}
-        portfolio_raw[grp_name] = {}
-        for method in method_names:
-            series = []
-            raw_series = []
-            for sym in grp_syms:
-                r = results.get(sym, {}).get(method, pd.Series(dtype=np.float64))
-                if len(r) > 0:
-                    series.append(r.rename(sym))
-                f = raw_daily.get(sym, {}).get(method, pd.Series(dtype=np.float64))
-                if len(f) > 0:
-                    raw_series.append(f.rename(sym))
-            if series:
-                combined = pd.concat(series, axis=1, join="outer").sort_index()
-                port_ret_s = combined.mean(axis=1).dropna()
-                port_ret = _portfolio_vol_scale(port_ret_s.to_numpy())
-                portfolio_rewards[grp_name][method] = pd.Series(port_ret, index=port_ret_s.index)
-            else:
-                portfolio_rewards[grp_name][method] = pd.Series(dtype=np.float64)
-            if raw_series:
-                combined_raw = pd.concat(raw_series, axis=1, join="outer").sort_index()
-                portfolio_raw[grp_name][method] = combined_raw.mean(axis=1).dropna()
-            else:
-                portfolio_raw[grp_name][method] = pd.Series(dtype=np.float64)
+        for grp_name, grp_syms in groupings.items():
+            portfolio_rewards[grp_name] = {}
+            portfolio_raw[grp_name] = {}
+            for method in method_names:
+                series = []
+                raw_series = []
+                for sym in grp_syms:
+                    r = results.get(sym, {}).get(method, pd.Series(dtype=np.float64))
+                    if len(r) > 0:
+                        series.append(r.rename(sym))
+                    f = raw_daily.get(sym, {}).get(method, pd.Series(dtype=np.float64))
+                    if len(f) > 0:
+                        raw_series.append(f.rename(sym))
+                if series:
+                    combined = pd.concat(series, axis=1, join="outer").sort_index()
+                    port_ret_s = combined.mean(axis=1).dropna()
+                    port_ret = _portfolio_vol_scale(port_ret_s.to_numpy())
+                    portfolio_rewards[grp_name][method] = pd.Series(port_ret, index=port_ret_s.index)
+                else:
+                    portfolio_rewards[grp_name][method] = pd.Series(dtype=np.float64)
+                if raw_series:
+                    combined_raw = pd.concat(raw_series, axis=1, join="outer").sort_index()
+                    portfolio_raw[grp_name][method] = combined_raw.mean(axis=1).dropna()
+                else:
+                    portfolio_raw[grp_name][method] = pd.Series(dtype=np.float64)
 
-    # 6. Compute metrics table
-    rows = []
-    for grp_name in groupings:
-        for method in method_names:
-            r = portfolio_rewards[grp_name].get(method, pd.Series(dtype=np.float64))
-            m = compute_metrics(r.to_numpy())
-            m["Group"] = grp_name
-            m["Method"] = method
-            rows.append(m)
+        # 6. Compute metrics table
+        rows = []
+        for grp_name in groupings:
+            for method in method_names:
+                r = portfolio_rewards[grp_name].get(method, pd.Series(dtype=np.float64))
+                m = compute_metrics(r.to_numpy())
+                m["Group"] = grp_name
+                m["Method"] = method
+                rows.append(m)
 
-    metrics_df = pd.DataFrame(rows)
-    col_order = ["Group", "Method", "E(R)", "Std(R)", "DD", "Sharpe",
-                 "Sortino", "MDD", "Calmar", "%+Ret", "AvgP/AvgL"]
-    metrics_df = metrics_df[col_order]
+        metrics_df = pd.DataFrame(rows)
+        col_order = ["Group", "Method", "E(R)", "Std(R)", "DD", "Sharpe",
+                     "Sortino", "MDD", "Calmar", "%+Ret", "AvgP/AvgL"]
+        metrics_df = metrics_df[col_order]
 
-    # 7. Print results table
-    print(f"\n{'='*60}")
-    print("Results (Zhang et al. Exhibit 2 style)")
-    print(f"{'='*60}")
-    _print_table(metrics_df)
+        # 7. Print results table
+        print(f"\n{'='*60}")
+        print("Results (Zhang et al. Exhibit 2 style)")
+        print(f"{'='*60}")
+        _print_table(metrics_df)
 
-    csv_path = out_dir / "results.csv"
-    metrics_df.to_csv(csv_path, index=False, float_format="%.4f")
-    print(f"\nResults saved to {csv_path}")
+        csv_path = out_dir / "results.csv"
+        metrics_df.to_csv(csv_path, index=False, float_format="%.4f")
+        print(f"\nResults saved to {csv_path}")
 
-    # 7b. Dump tidy raw data for offline replotting
-    _dump_series_csv(
-        portfolio_rewards, out_dir / "portfolio_zhang.csv",
-        key_col="group", value_col="reward_scaled",
-    )
-    _dump_series_csv(
-        portfolio_raw, out_dir / "portfolio_raw.csv",
-        key_col="group", value_col="frac_return",
-    )
-    _dump_series_csv(
-        results, out_dir / "per_symbol_zhang.csv",
-        key_col="symbol", value_col="reward_scaled",
-    )
-    _dump_series_csv(
-        raw_daily, out_dir / "per_symbol_raw.csv",
-        key_col="symbol", value_col="frac_return",
-    )
+        # 7b. Dump tidy raw data for offline replotting
+        _dump_series_csv(
+            portfolio_rewards, out_dir / "portfolio_zhang.csv",
+            key_col="group", value_col="reward_scaled",
+        )
+        _dump_series_csv(
+            portfolio_raw, out_dir / "portfolio_raw.csv",
+            key_col="group", value_col="frac_return",
+        )
+        _dump_series_csv(
+            results, out_dir / "per_symbol_zhang.csv",
+            key_col="symbol", value_col="reward_scaled",
+        )
+        _dump_series_csv(
+            raw_daily, out_dir / "per_symbol_raw.csv",
+            key_col="symbol", value_col="frac_return",
+        )
 
-    # 8. Plot cumulative trade returns
-    fig = _plot_cumulative(portfolio_rewards, groupings, method_names, out_dir)
-    fig_raw = _plot_cumulative_raw(portfolio_raw, groupings, method_names, out_dir)
+        # 8. Plot cumulative trade returns
+        fig = _plot_cumulative(portfolio_rewards, groupings, method_names, out_dir)
+        fig_raw = _plot_cumulative_raw(portfolio_raw, groupings, method_names, out_dir)
 
-    # 9. Final wandb artifacts
-    if logger is not None:
-        try:
+        # 9. Final wandb artifacts
+        if logger is not None:
             logger.log_table("final/metrics_table", metrics_df)
             logger.log_image("final/cumulative_returns", fig)
             logger.log_image("final/cumulative_return_raw", fig_raw)
-        finally:
-            plt.close(fig)
-            plt.close(fig_raw)
-            logger.finish()
-    else:
-        plt.close(fig)
-        plt.close(fig_raw)
 
-    return metrics_df
+        return metrics_df
+    finally:
+        if fig is not None:
+            plt.close(fig)
+        if fig_raw is not None:
+            plt.close(fig_raw)
+        if logger is not None:
+            logger.finish()
 
 
 def _print_table(df: pd.DataFrame) -> None:
