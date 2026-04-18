@@ -64,8 +64,10 @@ class A2CNetwork(nn.Module):
         self.log_std = nn.Parameter(torch.tensor(-1.6))  # exp(-1.6) ≈ 0.2
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Pre-squash mean; action = tanh(Normal(mean, std).sample()) ∈ (-1, 1).
+        # log_prob correction happens in the agent.
         h = self.encoder(x)
-        mean = torch.tanh(self.actor(h))   # (batch, 1), in [-1, 1]
+        mean = self.actor(h)                # (batch, 1), unbounded
         value = self.critic(h)              # (batch, 1)
         log_std = self.log_std.clamp(-5, 0)
         return mean.squeeze(-1), value.squeeze(-1), log_std

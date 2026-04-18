@@ -51,7 +51,10 @@ def _rsi(close: pd.Series, window: int) -> pd.Series:
 def _compute_symbol_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add all feature columns to a single-symbol DataFrame (sorted by date)."""
     df = df.copy()
-    close = df["adj_close"]
+    # Use unadjusted close to avoid retroactive dividend/split look-ahead.
+    # Paper uses Pinnacle ratio-adjusted futures which have no dividends;
+    # ETF Adj Close leaks future corporate-action info into historical bars.
+    close = df["close"]
     daily_ret = close.pct_change()
 
     # EWM volatility (annualized daily std)

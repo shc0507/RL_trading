@@ -75,9 +75,6 @@ _BASELINE_FNS = {
     "MACD": macd_signal,
 }
 
-_MAX_PORTFOLIO_SCALE: float = 10.0
-
-
 def _extract_hparams(agent, env_cfg) -> dict:
     """Introspect an agent instance for its hyperparameters."""
     h: dict = {}
@@ -150,25 +147,37 @@ def _baseline_frac_daily(
     if len(sub) < 2:
         return pd.Series(dtype=np.float64)
     positions = fn(feature_frame, symbol, start=start, end=end).astype(np.float64)
-    prices = sub["adj_close"].to_numpy(dtype=np.float64)
+    prices = sub["close"].to_numpy(dtype=np.float64)
     dates = pd.to_datetime(sub["date"].to_numpy())
     n = len(prices)
     simple_r = prices[1:] / prices[:-1] - 1.0
     return pd.Series(positions[: n - 1] * simple_r, index=dates[: n - 1])
 
 
+_MAX_PORTFOLIO_SCALE: float = 10.0
+
+
 def _portfolio_vol_scale(
     port_returns: np.ndarray,
     vol_target: float = DEFAULT_VOL_TARGET,
 ) -> np.ndarray:
-    """Apply portfolio-level vol targeting to an already equal-weighted return series."""
+    """Extra portfolio-level vol targeting from Zhang et al. Table 2.
+
+    Per-contract rewards are already σ_tgt-scaled inside the env, but the
+    equal-weight portfolio runs below σ_tgt due to diversification and
+    partial positions (discrete A=0, A2C |A|<1). This lifts each method
+    back to σ_tgt so E(R)/Sharpe are comparable across methods.
+
+    Uses expanding std (causal, shift(1)). Cap at ``_MAX_PORTFOLIO_SCALE``
+    prevents early-sample blow-ups when cumulative vol is near zero.
+    """
     if len(port_returns) < 60:
         return port_returns
     cum_std = pd.Series(port_returns).expanding(min_periods=60).std() * math.sqrt(252)
     cum_std = cum_std.shift(1).to_numpy().copy()
-    min_portfolio_vol = vol_target / _MAX_PORTFOLIO_SCALE
-    effective_vol = np.where(np.isnan(cum_std), min_portfolio_vol, cum_std)
-    effective_vol = np.maximum(effective_vol, vol_target / _MAX_PORTFOLIO_SCALE)
+    min_vol = vol_target / _MAX_PORTFOLIO_SCALE
+    effective_vol = np.where(np.isnan(cum_std), min_vol, cum_std)
+    effective_vol = np.maximum(effective_vol, min_vol)
     scale = np.minimum(vol_target / effective_vol, _MAX_PORTFOLIO_SCALE)
     scale[:60] = 1.0
     return port_returns * scale
@@ -548,11 +557,16 @@ def run_experiment(
         groupings: dict[str, list[str]] = dict(class_symbols)
         groupings["All"] = all_symbols
 
+        # Table 3 style: equal-weight mean of per-contract σ_tgt-scaled rewards.
         portfolio_rewards: dict[str, dict[str, pd.Series]] = {}
+        # Table 2 style: Table-3 series with an extra portfolio-level vol lift
+        # so methods with different natural vols (Long, DQN, A2C) are comparable.
+        portfolio_rewards_scaled: dict[str, dict[str, pd.Series]] = {}
         portfolio_raw: dict[str, dict[str, pd.Series]] = {}
 
         for grp_name, grp_syms in groupings.items():
             portfolio_rewards[grp_name] = {}
+            portfolio_rewards_scaled[grp_name] = {}
             portfolio_raw[grp_name] = {}
             for method in method_names:
                 series = []
@@ -566,46 +580,61 @@ def run_experiment(
                         raw_series.append(f.rename(sym))
                 if series:
                     combined = pd.concat(series, axis=1, join="outer").sort_index()
-                    port_ret_s = combined.mean(axis=1).dropna()
-                    port_ret = _portfolio_vol_scale(port_ret_s.to_numpy())
-                    portfolio_rewards[grp_name][method] = pd.Series(port_ret, index=port_ret_s.index)
+                    port = combined.mean(axis=1).dropna()
+                    portfolio_rewards[grp_name][method] = port
+                    scaled = _portfolio_vol_scale(port.to_numpy())
+                    portfolio_rewards_scaled[grp_name][method] = pd.Series(
+                        scaled, index=port.index,
+                    )
                 else:
                     portfolio_rewards[grp_name][method] = pd.Series(dtype=np.float64)
+                    portfolio_rewards_scaled[grp_name][method] = pd.Series(dtype=np.float64)
                 if raw_series:
                     combined_raw = pd.concat(raw_series, axis=1, join="outer").sort_index()
                     portfolio_raw[grp_name][method] = combined_raw.mean(axis=1).dropna()
                 else:
                     portfolio_raw[grp_name][method] = pd.Series(dtype=np.float64)
 
-        # 6. Compute metrics table
-        rows = []
-        for grp_name in groupings:
-            for method in method_names:
-                r = portfolio_rewards[grp_name].get(method, pd.Series(dtype=np.float64))
-                m = compute_metrics(r.to_numpy())
-                m["Group"] = grp_name
-                m["Method"] = method
-                rows.append(m)
-
-        metrics_df = pd.DataFrame(rows)
+        # 6. Compute metrics tables (Table 2 = scaled, Table 3 = unscaled).
         col_order = ["Group", "Method", "E(R)", "Std(R)", "DD", "Sharpe",
                      "Sortino", "MDD", "Calmar", "%+Ret", "AvgP/AvgL"]
-        metrics_df = metrics_df[col_order]
 
-        # 7. Print results table
+        def _metrics_from(nested: dict[str, dict[str, pd.Series]]) -> pd.DataFrame:
+            rows = []
+            for grp_name in groupings:
+                for method in method_names:
+                    r = nested[grp_name].get(method, pd.Series(dtype=np.float64))
+                    m = compute_metrics(r.to_numpy())
+                    m["Group"] = grp_name
+                    m["Method"] = method
+                    rows.append(m)
+            return pd.DataFrame(rows)[col_order]
+
+        metrics_df = _metrics_from(portfolio_rewards_scaled)
+        metrics_df_raw = _metrics_from(portfolio_rewards)
+
+        # 7. Print results tables
         print(f"\n{'='*60}")
-        print("Results (Zhang et al. Exhibit 2 style)")
+        print("Results — Table 2 (portfolio-level vol scaling applied)")
         print(f"{'='*60}")
         _print_table(metrics_df)
+        print(f"\n{'='*60}")
+        print("Results — Table 3 (no portfolio-level vol scaling)")
+        print(f"{'='*60}")
+        _print_table(metrics_df_raw)
 
-        csv_path = out_dir / "results.csv"
-        metrics_df.to_csv(csv_path, index=False, float_format="%.4f")
-        print(f"\nResults saved to {csv_path}")
+        metrics_df.to_csv(out_dir / "results.csv", index=False, float_format="%.4f")
+        metrics_df_raw.to_csv(out_dir / "results_unscaled.csv", index=False, float_format="%.4f")
+        print(f"\nResults saved to {out_dir / 'results.csv'} and {out_dir / 'results_unscaled.csv'}")
 
         # 7b. Dump tidy raw data for offline replotting
         _dump_series_csv(
-            portfolio_rewards, out_dir / "portfolio_zhang.csv",
+            portfolio_rewards_scaled, out_dir / "portfolio_zhang.csv",
             key_col="group", value_col="reward_scaled",
+        )
+        _dump_series_csv(
+            portfolio_rewards, out_dir / "portfolio_zhang_unscaled.csv",
+            key_col="group", value_col="reward",
         )
         _dump_series_csv(
             portfolio_raw, out_dir / "portfolio_raw.csv",
@@ -620,8 +649,10 @@ def run_experiment(
             key_col="symbol", value_col="frac_return",
         )
 
-        # 8. Plot cumulative trade returns
-        fig = _plot_cumulative(portfolio_rewards, groupings, method_names, out_dir)
+        # 8. Plot cumulative trade returns.
+        # Paper's Figure 1 is paired with Table 2, so headline plot uses the
+        # portfolio-vol-scaled series.
+        fig = _plot_cumulative(portfolio_rewards_scaled, groupings, method_names, out_dir)
         fig_raw = _plot_cumulative_raw(portfolio_raw, groupings, method_names, out_dir)
 
         # 9. Final wandb artifacts

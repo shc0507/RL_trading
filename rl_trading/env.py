@@ -100,7 +100,7 @@ class TradingEnv:
             raise ValueError(f"No data for {symbol} in split={split}")
 
         self._features = self._data[FEATURE_COLS].to_numpy(dtype=np.float32)
-        self._prices = self._data["adj_close"].to_numpy(dtype=np.float64)
+        self._prices = self._data["close"].to_numpy(dtype=np.float64)
         self._ewm_vol = self._data["ewm_vol"].to_numpy(dtype=np.float64)
         self._dates = self._data["date"].to_numpy()
 

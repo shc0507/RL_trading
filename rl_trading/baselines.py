@@ -90,7 +90,7 @@ def compute_baseline_rewards(
     since we need the next price to compute daily return).
     """
     df = _get_symbol_split(feature_frame, symbol, split, start=start, end=end)
-    prices = df["adj_close"].to_numpy(dtype=np.float64)
+    prices = df["close"].to_numpy(dtype=np.float64)
     ewm_vol = df["ewm_vol"].to_numpy(dtype=np.float64)
     dates = pd.to_datetime(df["date"].to_numpy())
     bp = cost_rate_bp / 10_000

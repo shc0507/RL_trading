@@ -48,21 +48,29 @@ class DQNAgent:
 
         self.optimizer = optim.Adam(self.online.parameters(), lr=lr)
         self.memory: deque = deque(maxlen=memory_size)
-        self.step_count = 0
+        self.grad_step_count = 0  # gradient updates; drives target-net refresh
+        self.env_step_count = 0   # env interactions during training; drives ε schedule
         self.last_stats: dict[str, float] = {}
 
     @property
     def epsilon(self) -> float:
-        frac = min(self.step_count / max(self.eps_decay_steps, 1), 1.0)
+        frac = min(self.env_step_count / max(self.eps_decay_steps, 1), 1.0)
         return self.eps_start + frac * (self.eps_end - self.eps_start)
 
     def select_action(self, state: np.ndarray, training: bool = True) -> int:
+        if training:
+            self.env_step_count += 1
         if training and random.random() < self.epsilon:
             return random.randint(0, 2)
-        with torch.no_grad():
-            t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            q = self.online(t)
-            return int(q.argmax(dim=1).item())
+        self.online.eval()
+        try:
+            with torch.no_grad():
+                t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                q = self.online(t)
+                return int(q.argmax(dim=1).item())
+        finally:
+            if training:
+                self.online.train()
 
     def store(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
@@ -92,8 +100,8 @@ class DQNAgent:
         loss.backward()
         self.optimizer.step()
 
-        self.step_count += 1
-        if self.step_count % self.target_update_freq == 0:
+        self.grad_step_count += 1
+        if self.grad_step_count % self.target_update_freq == 0:
             self.update_target()
 
         self.last_stats = {
@@ -141,15 +149,16 @@ class PGAgent:
         self.last_stats: dict[str, float] = {}
 
     def select_action(self, state: np.ndarray, training: bool = True) -> int:
-        with torch.no_grad():
-            t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            logits = self.net(t).squeeze(0)
-            probs = torch.softmax(logits, dim=-1)
-        if training:
-            action = int(torch.multinomial(probs, 1).item())
-        else:
-            action = int(probs.argmax().item())
-        return action
+        self.net.eval()
+        try:
+            with torch.no_grad():
+                t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                logits = self.net(t).squeeze(0)
+                probs = torch.softmax(logits, dim=-1)
+            return int(torch.multinomial(probs, 1).item())
+        finally:
+            if training:
+                self.net.train()
 
     def store(self, state, action, reward):
         self.states.append(state)
@@ -219,11 +228,15 @@ class A2CAgent:
         lr_critic: float = 1e-3,
         batch_size: int = 128,
         gamma: float = 0.3,
+        value_coef: float = 0.5,
+        entropy_coef: float = 0.01,
         device: str = "cpu",
     ):
         self.device = torch.device(device)
         self.gamma = gamma
         self.batch_size = batch_size
+        self.value_coef = value_coef
+        self.entropy_coef = entropy_coef
 
         self.net = A2CNetwork(n_features).to(self.device)
         self.optimizer = optim.Adam([
@@ -242,16 +255,20 @@ class A2CAgent:
         self.last_stats: dict[str, float] = {}
 
     def select_action(self, state: np.ndarray, training: bool = True) -> float:
-        with torch.no_grad():
-            t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            mean, _, log_std = self.net(t)
-            mean = mean.item()
-            std = log_std.exp().item()
-        if training:
-            action = np.clip(np.random.normal(mean, std), -1.0, 1.0)
-        else:
-            action = mean
-        return float(action)
+        # TanhNormal policy: sample u ~ N(mean, std), action = tanh(u) ∈ (-1, 1).
+        self.net.eval()
+        try:
+            with torch.no_grad():
+                t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                mean, _, log_std = self.net(t)
+                mean = mean.item()
+                std = log_std.exp().item()
+        finally:
+            if training:
+                self.net.train()
+        u = np.random.normal(mean, std) if training else mean
+        action = float(np.tanh(u))
+        return action
 
     def store(self, state, action, reward, next_state, done):
         self.states.append(state)
@@ -280,19 +297,30 @@ class A2CAgent:
         # Critic loss
         critic_loss = nn.functional.mse_loss(value, td_target)
 
-        # Actor loss (Gaussian log prob)
+        # TanhNormal log prob: action a = tanh(u), u ~ N(mean, std).
+        # Recover u = atanh(a) with numerical clamp; Jacobian correction is
+        # -log(1 - a^2).  See Haarnoja et al. (2018) SAC appendix C.
+        a_clamped = a.clamp(-0.999999, 0.999999)
+        u = torch.atanh(a_clamped)
         dist = torch.distributions.Normal(mean, std)
-        log_prob = dist.log_prob(a)
+        log_prob = dist.log_prob(u) - torch.log1p(-a_clamped.pow(2) + 1e-6)
         actor_loss = -(log_prob * advantage).mean()
 
-        # Single backward + step to avoid conflicting encoder updates
+        # Entropy bonus uses the pre-squash Gaussian entropy (common
+        # TanhNormal approximation; true entropy has no closed form).
+        entropy = dist.entropy().mean()
+
+        loss = actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy
+
         self.optimizer.zero_grad()
-        (critic_loss + actor_loss).backward()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=0.5)
         self.optimizer.step()
 
         self.last_stats = {
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
+            "entropy": entropy.item(),
             "advantage_mean": advantage.mean().item(),
             "advantage_std": advantage.std().item() if advantage.numel() > 1 else 0.0,
             "value_mean": value.mean().item(),
@@ -306,7 +334,7 @@ class A2CAgent:
         self.next_states.clear()
         self.dones.clear()
 
-        return (actor_loss.item() + critic_loss.item()) / 2
+        return loss.item()
 
     def save(self, path: str | Path):
         torch.save(self.net.state_dict(), path)
