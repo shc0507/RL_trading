@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     parser.add_argument("--output-dir", default="artifacts", help="Output directory")
     parser.add_argument("--device", default=None, help="Device: cpu, cuda, mps (default: auto-detect)")
+    parser.add_argument("--walk-forward", action="store_true", help="Use expanding-window walk-forward folds")
     args = parser.parse_args()
     run_experiment(
         symbols=args.symbols,
@@ -21,6 +22,7 @@ def main():
         patience=args.patience,
         output_dir=args.output_dir,
         device=args.device,
+        walk_forward=args.walk_forward,
     )
 
 
