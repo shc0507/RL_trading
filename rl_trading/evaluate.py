@@ -99,7 +99,7 @@ def _extract_hparams(agent, env_cfg) -> dict:
     return h
 
 
-def _collect_rl_rewards(
+def _collect_rl_test(
     agent: DQNAgent | PGAgent | A2CAgent,
     feature_frame: pd.DataFrame,
     symbol: str,
@@ -109,8 +109,8 @@ def _collect_rl_rewards(
     seq_len: int,
     start: str | None = None,
     end: str | None = None,
-) -> pd.Series:
-    """Run a trained agent on the given split and return date-indexed reward Series."""
+) -> pd.DataFrame:
+    """Run a trained agent and return DataFrame[reward, position, price, daily_return] by date."""
     cfg = EnvConfig(action_mode=action_mode, seq_len=seq_len)
     env = TradingEnv(feature_frame, cfg)
     if start is not None and end is not None:
@@ -123,9 +123,36 @@ def _collect_rl_rewards(
         next_state, _, done, _ = env.step(action)
         if next_state is not None:
             state = next_state
-    dates = pd.to_datetime(env.history["date"])
-    rewards = np.array(env.history["reward"], dtype=np.float64)
-    return pd.Series(rewards, index=dates, name=symbol)
+    return pd.DataFrame(
+        {
+            "reward": np.asarray(env.history["reward"], dtype=np.float64),
+            "position": np.asarray(env.history["position"], dtype=np.float64),
+            "price": np.asarray(env.history["price"], dtype=np.float64),
+            "daily_return": np.asarray(env.history["daily_return"], dtype=np.float64),
+        },
+        index=pd.to_datetime(env.history["date"]),
+    )
+
+
+def _baseline_frac_daily(
+    feature_frame: pd.DataFrame, symbol: str, fn, start: str, end: str,
+) -> pd.Series:
+    """Unscaled fractional daily portfolio return w_t · (p_{t+1}/p_t - 1) for a baseline."""
+    mask = (
+        (feature_frame["symbol"] == symbol)
+        & (feature_frame["window_ready"])
+        & (feature_frame["date"] >= start)
+        & (feature_frame["date"] <= end)
+    )
+    sub = feature_frame.loc[mask].sort_values("date").reset_index(drop=True)
+    if len(sub) < 2:
+        return pd.Series(dtype=np.float64)
+    positions = fn(feature_frame, symbol, start=start, end=end).astype(np.float64)
+    prices = sub["adj_close"].to_numpy(dtype=np.float64)
+    dates = pd.to_datetime(sub["date"].to_numpy())
+    n = len(prices)
+    simple_r = prices[1:] / prices[:-1] - 1.0
+    return pd.Series(positions[: n - 1] * simple_r, index=dates[: n - 1])
 
 
 def _portfolio_vol_scale(
@@ -141,6 +168,33 @@ def _portfolio_vol_scale(
     scale = vol_target / cum_std
     scale[:60] = 1.0
     return port_returns * scale
+
+
+def _dump_series_csv(
+    nested: dict[str, dict[str, pd.Series]],
+    path: Path,
+    *,
+    key_col: str,
+    value_col: str,
+) -> None:
+    """Flatten {outer: {method: Series[date]}} to tidy CSV [date, key_col, method, value_col]."""
+    rows = []
+    for outer_key, inner in nested.items():
+        for method, s in inner.items():
+            if len(s) == 0:
+                continue
+            df = pd.DataFrame({
+                "date": s.index,
+                key_col: outer_key,
+                "method": method,
+                value_col: s.to_numpy(),
+            })
+            rows.append(df)
+    if not rows:
+        return
+    out = pd.concat(rows, ignore_index=True)
+    out.to_csv(path, index=False)
+    print(f"Saved {path}")
 
 
 def _append_rewards(
@@ -260,6 +314,7 @@ def run_experiment(
 
     method_names = list(_BASELINE_FNS.keys()) + [a.upper() for a in agents]
     results: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
+    raw_daily: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
     failures: list[tuple[str, str, str]] = []
 
     # 3. Run each fold
@@ -286,6 +341,10 @@ def run_experiment(
                         start=test_dates[0], end=test_dates[1],
                     )
                     _append_rewards(results, sym, name, rewards)
+                    frac = _baseline_frac_daily(
+                        feat, sym, fn, test_dates[0], test_dates[1],
+                    )
+                    _append_rewards(raw_daily, sym, name, frac)
                 except Exception as e:
                     failures.append((sym, name, traceback.format_exc()))
         baseline_syms = sum(1 for s in all_symbols
@@ -323,13 +382,23 @@ def run_experiment(
 
                     for sym in class_syms:
                         try:
-                            rewards = _collect_rl_rewards(
+                            trade = _collect_rl_test(
                                 agent, feat, sym,
                                 action_mode=env_cfg.action_mode,
                                 seq_len=env_cfg.seq_len,
                                 start=test_dates[0], end=test_dates[1],
                             )
+                            rewards = pd.Series(
+                                trade["reward"].to_numpy(), index=trade.index,
+                            )
                             _append_rewards(results, sym, label, rewards)
+                            # Unscaled fractional daily return: w_t · (p_{t+1}/p_t - 1)
+                            simple_r = trade["daily_return"].to_numpy() / trade["price"].to_numpy()
+                            frac = pd.Series(
+                                trade["position"].to_numpy() * simple_r,
+                                index=trade.index,
+                            )
+                            _append_rewards(raw_daily, sym, label, frac)
                             print(f"    {sym}/{label}: {len(rewards)} days, "
                                   f"mean={rewards.mean():.6f}")
                         except Exception as e:
@@ -359,30 +428,41 @@ def run_experiment(
     groupings: dict[str, list[str]] = dict(class_symbols)
     groupings["All"] = all_symbols
 
-    portfolio_rewards: dict[str, dict[str, np.ndarray]] = {}
+    portfolio_rewards: dict[str, dict[str, pd.Series]] = {}
+    portfolio_raw: dict[str, dict[str, pd.Series]] = {}
 
     for grp_name, grp_syms in groupings.items():
         portfolio_rewards[grp_name] = {}
+        portfolio_raw[grp_name] = {}
         for method in method_names:
             series = []
+            raw_series = []
             for sym in grp_syms:
                 r = results.get(sym, {}).get(method, pd.Series(dtype=np.float64))
                 if len(r) > 0:
                     series.append(r.rename(sym))
-            if not series:
-                portfolio_rewards[grp_name][method] = np.array([])
-                continue
-            combined = pd.concat(series, axis=1, join="outer").sort_index()
-            port_ret = combined.mean(axis=1).dropna().to_numpy()
-            port_ret = _portfolio_vol_scale(port_ret)
-            portfolio_rewards[grp_name][method] = port_ret
+                f = raw_daily.get(sym, {}).get(method, pd.Series(dtype=np.float64))
+                if len(f) > 0:
+                    raw_series.append(f.rename(sym))
+            if series:
+                combined = pd.concat(series, axis=1, join="outer").sort_index()
+                port_ret_s = combined.mean(axis=1).dropna()
+                port_ret = _portfolio_vol_scale(port_ret_s.to_numpy())
+                portfolio_rewards[grp_name][method] = pd.Series(port_ret, index=port_ret_s.index)
+            else:
+                portfolio_rewards[grp_name][method] = pd.Series(dtype=np.float64)
+            if raw_series:
+                combined_raw = pd.concat(raw_series, axis=1, join="outer").sort_index()
+                portfolio_raw[grp_name][method] = combined_raw.mean(axis=1).dropna()
+            else:
+                portfolio_raw[grp_name][method] = pd.Series(dtype=np.float64)
 
     # 6. Compute metrics table
     rows = []
     for grp_name in groupings:
         for method in method_names:
-            r = portfolio_rewards[grp_name].get(method, np.array([]))
-            m = compute_metrics(r)
+            r = portfolio_rewards[grp_name].get(method, pd.Series(dtype=np.float64))
+            m = compute_metrics(r.to_numpy())
             m["Group"] = grp_name
             m["Method"] = method
             rows.append(m)
@@ -402,19 +482,41 @@ def run_experiment(
     metrics_df.to_csv(csv_path, index=False, float_format="%.4f")
     print(f"\nResults saved to {csv_path}")
 
+    # 7b. Dump tidy raw data for offline replotting
+    _dump_series_csv(
+        portfolio_rewards, out_dir / "portfolio_zhang.csv",
+        key_col="group", value_col="reward_scaled",
+    )
+    _dump_series_csv(
+        portfolio_raw, out_dir / "portfolio_raw.csv",
+        key_col="group", value_col="frac_return",
+    )
+    _dump_series_csv(
+        results, out_dir / "per_symbol_zhang.csv",
+        key_col="symbol", value_col="reward_scaled",
+    )
+    _dump_series_csv(
+        raw_daily, out_dir / "per_symbol_raw.csv",
+        key_col="symbol", value_col="frac_return",
+    )
+
     # 8. Plot cumulative trade returns
     fig = _plot_cumulative(portfolio_rewards, groupings, method_names, out_dir)
+    fig_raw = _plot_cumulative_raw(portfolio_raw, groupings, method_names, out_dir)
 
     # 9. Final wandb artifacts
     if logger is not None:
         try:
             logger.log_table("final/metrics_table", metrics_df)
             logger.log_image("final/cumulative_returns", fig)
+            logger.log_image("final/cumulative_return_raw", fig_raw)
         finally:
             plt.close(fig)
+            plt.close(fig_raw)
             logger.finish()
     else:
         plt.close(fig)
+        plt.close(fig_raw)
 
     return metrics_df
 
@@ -436,34 +538,127 @@ def _print_table(df: pd.DataFrame) -> None:
             print()
 
 
+_ZHANG_STYLE: dict[str, dict] = {
+    "Long":    {"color": "#1f77b4", "linestyle": "--", "linewidth": 1.2},
+    "Sign(R)": {"color": "#ff7f0e", "linestyle": "-",  "linewidth": 1.0,
+                "marker": "o", "markersize": 4, "markevery": 60},
+    "MACD":    {"color": "#2ca02c", "linestyle": "-",  "linewidth": 1.0,
+                "marker": "*", "markersize": 6, "markevery": 60},
+    "DQN":     {"color": "#d62728", "linestyle": "-",  "linewidth": 1.5},
+    "PG":      {"color": "#9467bd", "linestyle": "-",  "linewidth": 1.0,
+                "marker": "h", "markersize": 5, "markevery": 60},
+    "A2C":     {"color": "#8c564b", "linestyle": ":",  "linewidth": 1.0,
+                "marker": "+", "markersize": 6, "markevery": 60},
+}
+
+_ZHANG_ORDER = ["commodity", "equity_index", "fixed_income", "fx", "All"]
+
+_ZHANG_TITLES = {
+    "commodity": "Commodity",
+    "equity_index": "Equity Index",
+    "fixed_income": "Fixed Income",
+    "fx": "FX",
+    "All": "All",
+}
+
+
 def _plot_cumulative(
-    portfolio_rewards: dict[str, dict[str, np.ndarray]],
+    portfolio_rewards: dict[str, dict[str, pd.Series]],
     groupings: dict[str, list[str]],
     method_names: list[str],
     out_dir: Path,
 ):
-    """Plot cumulative trade returns (Zhang Exhibit 3 style)."""
-    grp_names = list(groupings.keys())
-    n = len(grp_names)
-    fig, axes = plt.subplots(n, 1, figsize=(12, 4 * n), sharex=False)
-    if n == 1:
-        axes = [axes]
+    """Plot cumulative trade returns in Zhang (2020) Exhibit 3 style:
+    2x3 grid (commodity, equity_index, fixed_income / fx, All, hidden),
+    calendar-year x-axis, no titles/labels/grids, single bottom legend.
+    """
+    import matplotlib.dates as mdates
 
-    for ax, grp_name in zip(axes, grp_names):
+    grps_ordered = [g for g in _ZHANG_ORDER if g in groupings]
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6))
+    ax_flat = axes.flatten()
+
+    method_handles: dict[str, object] = {}
+    for i, grp in enumerate(grps_ordered):
+        ax = ax_flat[i]
         for method in method_names:
-            r = portfolio_rewards[grp_name].get(method, np.array([]))
-            if len(r) == 0:
+            s = portfolio_rewards[grp].get(method, pd.Series(dtype=np.float64))
+            if len(s) == 0:
                 continue
-            cum = np.cumsum(r)
-            ax.plot(cum, label=method, linewidth=1.0)
-        ax.set_title(grp_name)
-        ax.set_ylabel("Cumulative Return")
-        ax.legend(loc="upper left", fontsize=8)
-        ax.grid(True, alpha=0.3)
+            cum = s.cumsum()
+            style = _ZHANG_STYLE.get(method, {"linewidth": 1.0})
+            line, = ax.plot(cum.index, cum.values, label=method, **style)
+            method_handles.setdefault(method, line)
+        ax.set_title(_ZHANG_TITLES.get(grp, grp), fontsize=10)
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.tick_params(axis="both", labelsize=8)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
 
-    axes[-1].set_xlabel("Trading Day")
-    fig.tight_layout()
+    # Hide unused slots
+    for j in range(len(grps_ordered), len(ax_flat)):
+        ax_flat[j].axis("off")
+
+    # Single horizontal legend below all subplots
+    handles = [method_handles[m] for m in method_names if m in method_handles]
+    labels = [m for m in method_names if m in method_handles]
+    fig.legend(handles, labels, loc="lower center", ncol=len(labels),
+               frameon=True, fontsize=10, bbox_to_anchor=(0.5, 0.0))
+
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     png_path = out_dir / "cumulative_returns.png"
-    fig.savefig(png_path, dpi=120)
+    fig.savefig(png_path, dpi=120, bbox_inches="tight")
+    print(f"Plot saved to {png_path}")
+    return fig
+
+
+def _plot_cumulative_raw(
+    portfolio_raw: dict[str, dict[str, pd.Series]],
+    groupings: dict[str, list[str]],
+    method_names: list[str],
+    out_dir: Path,
+):
+    """Plot compounded $1 cumulative return in % — wealth_t = prod(1 + w_s · r_s) - 1,
+    equal-weighted per-group portfolio, Zhang Exhibit 3 2×3 layout."""
+    import matplotlib.dates as mdates
+
+    grps_ordered = [g for g in _ZHANG_ORDER if g in groupings]
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6))
+    ax_flat = axes.flatten()
+
+    method_handles: dict[str, object] = {}
+    for i, grp in enumerate(grps_ordered):
+        ax = ax_flat[i]
+        for method in method_names:
+            s = portfolio_raw[grp].get(method, pd.Series(dtype=np.float64))
+            if len(s) == 0:
+                continue
+            gross = np.clip(1.0 + s.to_numpy(), 1e-8, None)
+            cum_pct = (np.cumprod(gross) - 1.0) * 100.0
+            style = _ZHANG_STYLE.get(method, {"linewidth": 1.0})
+            line, = ax.plot(s.index, cum_pct, label=method, **style)
+            method_handles.setdefault(method, line)
+        ax.set_title(_ZHANG_TITLES.get(grp, grp), fontsize=10)
+        ax.axhline(0, color="k", linewidth=0.5, alpha=0.3)
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.tick_params(axis="both", labelsize=8)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+    for j in range(len(grps_ordered), len(ax_flat)):
+        ax_flat[j].axis("off")
+
+    handles = [method_handles[m] for m in method_names if m in method_handles]
+    labels = [m for m in method_names if m in method_handles]
+    fig.legend(handles, labels, loc="lower center", ncol=len(labels),
+               frameon=True, fontsize=10, bbox_to_anchor=(0.5, 0.0))
+    fig.suptitle("Raw Cumulative Return (%) — compounded $1, equal-weighted",
+                 fontsize=11, y=0.995)
+
+    fig.tight_layout(rect=(0, 0.08, 1, 0.97))
+    png_path = out_dir / "cumulative_return_raw.png"
+    fig.savefig(png_path, dpi=120, bbox_inches="tight")
     print(f"Plot saved to {png_path}")
     return fig

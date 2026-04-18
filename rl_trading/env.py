@@ -116,6 +116,7 @@ class TradingEnv:
             "reward": [],
             "daily_return": [],
             "transaction_cost": [],
+            "position": [],
         }
 
         return self._get_state()
@@ -170,6 +171,7 @@ class TradingEnv:
             "reward": reward,
             "daily_return": r_t,
             "transaction_cost": tc,
+            "position": position,
         }
         for k, v in info.items():
             self.history[k].append(v)
