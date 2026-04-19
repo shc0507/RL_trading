@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
+from datetime import date, timedelta
+
 # ── Feature windows ──────────────────────────────────────────────────
 OBSERVATION_WINDOW: int = 60
 VOLATILITY_SPAN: int = 60  # EWM vol lookback
@@ -70,26 +73,87 @@ def walk_forward_splits(
     min_train_years: int = 5,
     val_years: int = 3,
     test_years: int = 3,
+    val_frac: float = 0.10,
 ) -> list[dict[str, tuple[str, str]]]:
-    """Generate expanding-window walk-forward folds.
+    """Generate expanding-window walk-forward folds (Zhang et al. 2019 style).
 
-    Each fold has an expanding training window (always starts at data_start),
-    a fixed-length validation window, and a fixed-length test window.
+    For each fold, the "train+val window" spans data_start to the calendar
+    year before test_start_year (same fold cadence as before). The last
+    ``val_frac`` portion (by calendar months) of that window becomes the
+    validation block; the earlier 1 - ``val_frac`` portion is training.
+    This keeps val adjacent to (and upstream of) test without a separate
+    multi-year block, matching the paper's "10% of training data as a
+    separate cross-validation set" prescription.
+
+    Parameters
+    ----------
+    val_years:
+        Deprecated. Retained for backwards compatibility with existing
+        callers; a non-default value is ignored with a warning. Fold
+        cadence is still driven by the old ``val_years`` default so the
+        5-fold layout is unchanged.
+    val_frac:
+        Fraction of the combined train+val window (in months) assigned
+        to validation. Default 0.10 per the paper.
     """
+    if val_years != 3:
+        warnings.warn(
+            "walk_forward_splits: `val_years` is deprecated and ignored; "
+            "validation is now the last `val_frac` of the train+val window.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if not 0.0 < val_frac < 1.0:
+        raise ValueError(f"val_frac must be in (0, 1); got {val_frac}")
+
     start_year = int(data_start[:4])
     end_year = int(data_end[:4])
 
+    # Keep prior fold cadence: test_start_year advances every test_years,
+    # first test year = data_start + min_train_years + 3 (old val_years=3).
+    first_test_year = start_year + min_train_years + 3
+
     folds: list[dict[str, tuple[str, str]]] = []
-    test_start_year = start_year + min_train_years + val_years
+    test_start_year = first_test_year
 
     while test_start_year <= end_year:
         test_end_year = min(test_start_year + test_years - 1, end_year)
-        val_start_year = test_start_year - val_years
-        train_end_year = val_start_year - 1
+        # Combined train+val window ends the year before test starts.
+        combined_end_year = test_start_year - 1
+        combined_start = date.fromisoformat(data_start)
+        combined_end = date(combined_end_year, 12, 31)
+
+        # Split by calendar months: last ceil(val_frac * total_months)
+        # months are validation, with at least one month of val.
+        total_months = (
+            (combined_end.year - combined_start.year) * 12
+            + (combined_end.month - combined_start.month)
+            + 1
+        )
+        val_months = max(1, int(round(val_frac * total_months)))
+        train_months = total_months - val_months
+
+        # train_end = last day of the month `train_months` months after start.
+        train_end_month_index = combined_start.month - 1 + train_months - 1
+        train_end_year = combined_start.year + train_end_month_index // 12
+        train_end_month = train_end_month_index % 12 + 1
+        # Last day of that month.
+        if train_end_month == 12:
+            train_end_day = date(train_end_year, 12, 31)
+        else:
+            train_end_day = date(train_end_year, train_end_month + 1, 1) - timedelta(days=1)
+
+        # val_start = first day of the following month; ensures >=1-day gap
+        # from train_end (next calendar day, and always a fresh month).
+        val_start_month_index = train_end_month_index + 1
+        val_start_year = combined_start.year + val_start_month_index // 12
+        val_start_month = val_start_month_index % 12 + 1
+        val_start_day = date(val_start_year, val_start_month, 1)
+        val_end_day = combined_end
 
         folds.append({
-            "train": (data_start, f"{train_end_year}-12-31"),
-            "val": (f"{val_start_year}-01-01", f"{val_start_year + val_years - 1}-12-31"),
+            "train": (data_start, train_end_day.isoformat()),
+            "val": (val_start_day.isoformat(), val_end_day.isoformat()),
             "test": (f"{test_start_year}-01-01", f"{test_end_year}-12-31"),
         })
         test_start_year += test_years
