@@ -187,9 +187,13 @@ class PGAgent:
             returns.insert(0, g)
         returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
 
-        # Paper Eq. 6 is vanilla REINFORCE (no baseline); mean-subtraction
-        # is a common variance-reduction trick but is not what the paper
-        # reports for the "PG" row in Exhibit 2.
+        # Subtract the batch mean as a constant baseline. Paper Eq. 6 shows
+        # vanilla REINFORCE, but with dollar-unit rewards on high-priced
+        # commodity contracts the DC offset in G_t saturates the softmax
+        # and training diverges (inf/nan in multinomial). Subtracting the
+        # mean is unbiased — E[∇log π · b] = 0 for any state-independent b
+        # — so the expected gradient matches Eq. 6; only variance is lower.
+        returns = returns - returns.mean()
 
         s = torch.tensor(np.array(self.states), dtype=torch.float32, device=self.device)
         a = torch.tensor(self.actions, dtype=torch.long, device=self.device)
