@@ -25,6 +25,7 @@ from rl_trading.baselines import (
 from rl_trading.config import (
     ACTIVE_UNIVERSE,
     DEFAULT_VOL_TARGET,
+    PORTFOLIO_VOL_TARGET,
     TEST_END,
     TEST_START,
     TRAIN_END,
@@ -157,7 +158,7 @@ def _baseline_frac_daily(
 
 def _portfolio_vol_scale(
     port_returns: np.ndarray,
-    vol_target: float = DEFAULT_VOL_TARGET,
+    vol_target: float = PORTFOLIO_VOL_TARGET,
 ) -> np.ndarray:
     """Portfolio-level vol normalization, Zhang 2019 Exhibit 2.
 
