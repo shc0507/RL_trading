@@ -25,6 +25,8 @@ class WandbLogger:
         name: str | None,
         tags: list[str] | None,
         config: dict,
+        group: str | None = None,
+        job_type: str | None = None,
     ) -> "WandbLogger | None":
         if not enabled:
             return None
@@ -38,6 +40,8 @@ class WandbLogger:
             name=name,
             tags=tags,
             config=config,
+            group=group,
+            job_type=job_type,
             mode="online",
         )
         return cls(run)

@@ -68,6 +68,7 @@ def run_one(
     wandb_entity: str | None = None,
     wandb_name: str | None = None,
     wandb_tags: list[str] | None = None,
+    wandb_group: str | None = None,
 ) -> dict:
     """Train one (agent, fold, class) and dump results to output_dir."""
     if device is None:
@@ -110,13 +111,22 @@ def run_one(
         "device": device,
         "hparams": _extract_hparams(agent, env_cfg),
     }
+    # Collapse the 60-task parallel sweep in the wandb UI:
+    #   group    = run-id (all 60 tasks share the same group)
+    #   job_type = agent (3 job_types per group)
+    #   tags     add per-tuple filters (class_X, fold_N).
+    per_tuple_tags = list(wandb_tags or []) + [
+        f"class:{asset_class}", f"fold:{fold_idx + 1}",
+    ]
     logger = WandbLogger.init(
         enabled=wandb_enabled,
         project=wandb_project,
         entity=wandb_entity,
         name=wandb_name or f"{agent_name}-{fold_label}",
-        tags=wandb_tags,
+        tags=per_tuple_tags,
         config=wandb_config,
+        group=wandb_group,
+        job_type=agent_name,
     )
 
     ckpt_dir = out_dir / "checkpoint"
@@ -257,6 +267,9 @@ def main():
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--wandb-tags", nargs="*", default=None)
+    parser.add_argument("--wandb-group", default=None,
+                        help="wandb run group; defaults to basename of --run-dir so "
+                             "all tasks in one parallel sweep share a group")
     args = parser.parse_args()
 
     if args.array_index is not None:
@@ -271,8 +284,10 @@ def main():
 
     if args.run_dir is not None:
         output_dir = _canonical_output_dir(Path(args.run_dir), agent, fold_idx, asset_class)
+        wandb_group = args.wandb_group or Path(args.run_dir).name
     else:
         output_dir = Path(args.output_dir)
+        wandb_group = args.wandb_group
 
     print(f"Training tuple: agent={agent} fold={fold_idx + 1} class={asset_class}")
     print(f"Output dir: {output_dir}")
@@ -290,6 +305,7 @@ def main():
         wandb_entity=args.wandb_entity,
         wandb_name=args.wandb_name,
         wandb_tags=args.wandb_tags,
+        wandb_group=wandb_group,
     )
 
 
