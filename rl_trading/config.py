@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from datetime import date, timedelta
 
@@ -16,16 +17,18 @@ RETURN_HORIZONS: tuple[int, ...] = (21, 42, 63, 252)
 ANNUALIZATION_FACTOR: int = 252
 
 # ── Trading defaults ─────────────────────────────────────────────────
-DEFAULT_VOL_TARGET: float = 0.15
-DEFAULT_COST_RATE_BP: float = 2.0  # basis points
+DEFAULT_VOL_TARGET: float = 1.0
+# Paper Exhibit 1: bp = 0.0020 (= 20 basis points; paper defines 1 bp = 0.0001).
+DEFAULT_COST_RATE_BP: float = 20.0  # basis points
 
 # ── Train / val / test splits ────────────────────────────────────────
+# Paper test horizon ends 2019-12-31; anything beyond is post-paper extension.
 TRAIN_START = "2005-01-01"
 TRAIN_END = "2015-12-31"
 VAL_START = "2016-01-01"
 VAL_END = "2018-12-31"
 TEST_START = "2019-01-01"
-TEST_END = "2025-12-31"
+TEST_END = "2019-12-31"
 
 # ── Asset universe (strict subset of original ETF proxies) ───────────
 UNIVERSE: list[dict[str, str]] = [
@@ -66,13 +69,87 @@ UNIVERSE: list[dict[str, str]] = [
     {"symbol": "UUP", "asset_class": "fx"},
 ]
 
+# ── CLC / Pinnacle futures universe (Zhang 2019 Appendix A) ──────────
+# 49 distinct continuous futures; paper header says 50 but table lists 49.
+# Bucketing follows Zhang exactly (NK stays under FX even though it's an
+# equity index contract — that's how Appendix A groups it).
+CLC_UNIVERSE: list[dict[str, str]] = [
+    # Commodities (25)
+    {"symbol": "CC", "asset_class": "commodity"},
+    {"symbol": "DA", "asset_class": "commodity"},
+    {"symbol": "GI", "asset_class": "commodity"},
+    {"symbol": "JO", "asset_class": "commodity"},
+    {"symbol": "KC", "asset_class": "commodity"},
+    {"symbol": "KW", "asset_class": "commodity"},
+    {"symbol": "LB", "asset_class": "commodity"},
+    {"symbol": "NR", "asset_class": "commodity"},
+    {"symbol": "SB", "asset_class": "commodity"},
+    {"symbol": "ZA", "asset_class": "commodity"},
+    {"symbol": "ZC", "asset_class": "commodity"},
+    {"symbol": "ZF", "asset_class": "commodity"},
+    {"symbol": "ZG", "asset_class": "commodity"},
+    {"symbol": "ZH", "asset_class": "commodity"},
+    {"symbol": "ZI", "asset_class": "commodity"},
+    {"symbol": "ZK", "asset_class": "commodity"},
+    {"symbol": "ZL", "asset_class": "commodity"},
+    {"symbol": "ZN", "asset_class": "commodity"},
+    {"symbol": "ZO", "asset_class": "commodity"},
+    {"symbol": "ZP", "asset_class": "commodity"},
+    {"symbol": "ZR", "asset_class": "commodity"},
+    {"symbol": "ZT", "asset_class": "commodity"},
+    {"symbol": "ZU", "asset_class": "commodity"},
+    {"symbol": "ZW", "asset_class": "commodity"},
+    {"symbol": "ZZ", "asset_class": "commodity"},
+    # Equity Indexes (10)
+    {"symbol": "CA", "asset_class": "equity_index"},
+    {"symbol": "ER", "asset_class": "equity_index"},
+    {"symbol": "ES", "asset_class": "equity_index"},
+    {"symbol": "LX", "asset_class": "equity_index"},
+    {"symbol": "MD", "asset_class": "equity_index"},
+    {"symbol": "SC", "asset_class": "equity_index"},
+    {"symbol": "SP", "asset_class": "equity_index"},
+    {"symbol": "XU", "asset_class": "equity_index"},
+    {"symbol": "XX", "asset_class": "equity_index"},
+    {"symbol": "YM", "asset_class": "equity_index"},
+    # Fixed Income (5)
+    {"symbol": "DT", "asset_class": "fixed_income"},
+    {"symbol": "FB", "asset_class": "fixed_income"},
+    {"symbol": "TY", "asset_class": "fixed_income"},
+    {"symbol": "UB", "asset_class": "fixed_income"},
+    {"symbol": "US", "asset_class": "fixed_income"},
+    # FX (9)
+    {"symbol": "AN", "asset_class": "fx"},
+    {"symbol": "BN", "asset_class": "fx"},
+    {"symbol": "CN", "asset_class": "fx"},
+    {"symbol": "DX", "asset_class": "fx"},
+    {"symbol": "FN", "asset_class": "fx"},
+    {"symbol": "JN", "asset_class": "fx"},
+    {"symbol": "MP", "asset_class": "fx"},
+    {"symbol": "NK", "asset_class": "fx"},
+    {"symbol": "SN", "asset_class": "fx"},
+]
+
+# ── Data-source selector ─────────────────────────────────────────────
+# Set RL_DATA_SOURCE=etf to use the legacy yfinance ETF proxies; default
+# is 'clc' (Pinnacle RAD futures, matches the paper).
+DATA_SOURCE: str = os.environ.get("RL_DATA_SOURCE", "clc").lower()
+if DATA_SOURCE not in ("etf", "clc"):
+    raise ValueError(
+        f"RL_DATA_SOURCE must be 'etf' or 'clc'; got {DATA_SOURCE!r}"
+    )
+
+# Pipeline callers should import ACTIVE_UNIVERSE; it tracks DATA_SOURCE.
+ACTIVE_UNIVERSE: list[dict[str, str]] = (
+    CLC_UNIVERSE if DATA_SOURCE == "clc" else UNIVERSE
+)
+
 
 def walk_forward_splits(
     data_start: str = TRAIN_START,
     data_end: str = TEST_END,
-    min_train_years: int = 5,
+    min_train_years: int = 6,
     val_years: int = 3,
-    test_years: int = 3,
+    test_years: int = 5,
     val_frac: float = 0.10,
 ) -> list[dict[str, tuple[str, str]]]:
     """Generate expanding-window walk-forward folds (Zhang et al. 2019 style).
@@ -109,9 +186,13 @@ def walk_forward_splits(
     start_year = int(data_start[:4])
     end_year = int(data_end[:4])
 
-    # Keep prior fold cadence: test_start_year advances every test_years,
-    # first test year = data_start + min_train_years + 3 (old val_years=3).
-    first_test_year = start_year + min_train_years + 3
+    # Paper p.6: "We retrain our model at every five years, using all data
+    # available up to that point ... testing period is from 2011 to 2019."
+    # With data_start=2005 and min_train_years=6 we get first test year
+    # 2011, and test_years=5 cadence gives exactly two folds:
+    #   train 2005-01→2010-12 (10% val at tail), test 2011-01→2015-12
+    #   train 2005-01→2015-12 (10% val at tail), test 2016-01→2019-12 (clamped)
+    first_test_year = start_year + min_train_years
 
     folds: list[dict[str, tuple[str, str]]] = []
     test_start_year = first_test_year

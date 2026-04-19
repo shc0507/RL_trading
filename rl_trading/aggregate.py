@@ -21,7 +21,7 @@ from rl_trading.baselines import (
     macd_signal,
     sign_r,
 )
-from rl_trading.config import UNIVERSE, walk_forward_splits
+from rl_trading.config import ACTIVE_UNIVERSE, walk_forward_splits
 from rl_trading.env import EnvConfig
 from rl_trading.evaluate import (
     _baseline_frac_daily,
@@ -60,14 +60,14 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
     feature_cache = Path(feature_cache)
 
     # 1. Features + eligible universe (matches train_one's filter logic).
-    requested_syms = [u["symbol"] for u in UNIVERSE]
+    requested_syms = [u["symbol"] for u in ACTIVE_UNIVERSE]
     feat = load_or_build_feature_cache(requested_syms, feature_cache)
     folds = walk_forward_splits()
     # We don't know agent seq_len here but all three agents use seq_len=60
     # per _make_agent_factories. Use the largest defensible value.
     min_rows = EnvConfig().seq_len + 1
     universe, exclusions = _filter_full_history_universe(
-        UNIVERSE, feat, folds, min_rows=min_rows,
+        ACTIVE_UNIVERSE, feat, folds, min_rows=min_rows,
     )
     _print_universe_summary(requested_syms, universe, exclusions, min_rows)
     all_symbols = [u["symbol"] for u in universe]

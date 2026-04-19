@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=rl-wf-train
-#SBATCH --array=0-59%8
+#SBATCH --array=0-23%8
 #SBATCH --output=logs/slurm-%x-%A_%a.out
 #SBATCH --error=logs/slurm-%x-%A_%a.err
 #SBATCH --time=06:00:00
@@ -10,7 +10,7 @@
 #SBATCH --mem=32G
 
 # Stage 2: one training task per (agent, fold, asset_class). The array size
-# (3 agents × 5 folds × 4 classes = 60) is decoded by train_one.py. The
+# (3 agents × 2 folds × 4 classes = 24) is decoded by train_one.py. The
 # `%8` cap matches the per-user general-gpu concurrency QoS (gres/gpu=8).
 # Pass --run-id on sbatch like `--export=RUN_ID=foo` to label the output.
 

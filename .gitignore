@@ -206,6 +206,7 @@ artifacts/
 smoke_features.png
 wandb/
 logs/
+CLCDATA/
 
 # Local workspace noise
 .DS_Store

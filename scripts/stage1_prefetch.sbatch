@@ -24,9 +24,9 @@ uv sync --locked --quiet --extra wandb
 CACHE_PATH="artifacts/cache/features.parquet"
 
 uv run python -u -c "
-from rl_trading.config import UNIVERSE
+from rl_trading.config import ACTIVE_UNIVERSE
 from rl_trading.evaluate import load_or_build_feature_cache
-syms = [u['symbol'] for u in UNIVERSE]
+syms = [u['symbol'] for u in ACTIVE_UNIVERSE]
 feat = load_or_build_feature_cache(syms, '${CACHE_PATH}')
 print(f'Feature cache ready: rows={len(feat)}, symbols={feat[\"symbol\"].nunique()}')
 "

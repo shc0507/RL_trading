@@ -23,6 +23,7 @@ from rl_trading.baselines import (
     sign_r,
 )
 from rl_trading.config import (
+    ACTIVE_UNIVERSE,
     DEFAULT_VOL_TARGET,
     TEST_END,
     TEST_START,
@@ -33,7 +34,7 @@ from rl_trading.config import (
     VAL_START,
     walk_forward_splits,
 )
-from rl_trading.data import fetch_bars
+from rl_trading.data import load_bars
 from rl_trading.env import EnvConfig, STATE_DIM, TradingEnv
 from rl_trading.features import FeatureBuilder
 from rl_trading.metrics import compute_metrics
@@ -154,33 +155,26 @@ def _baseline_frac_daily(
     return pd.Series(positions[: n - 1] * simple_r, index=dates[: n - 1])
 
 
-_MAX_PORTFOLIO_SCALE: float = 10.0
-
-
 def _portfolio_vol_scale(
     port_returns: np.ndarray,
     vol_target: float = DEFAULT_VOL_TARGET,
 ) -> np.ndarray:
-    """Extra portfolio-level vol targeting from Zhang et al. Table 2.
+    """Portfolio-level vol normalization, Zhang 2019 Exhibit 2.
 
-    Per-contract rewards are already σ_tgt-scaled inside the env, but the
-    equal-weight portfolio runs below σ_tgt due to diversification and
-    partial positions (discrete A=0, A2C |A|<1). This lifts each method
-    back to σ_tgt so E(R)/Sharpe are comparable across methods.
-
-    Uses expanding std (causal, shift(1)). Cap at ``_MAX_PORTFOLIO_SCALE``
-    prevents early-sample blow-ups when cumulative vol is near zero.
+    Paper says the extra scaling "brings volatility of different methods
+    to the same target" — a reporting normalization applied after the
+    full test stream is in hand (Exhibit 2's Std(R) is near-identical
+    across methods, which only happens with a single constant rescale).
+    So we scale the whole series by one factor = σ_tgt / σ_realized_full,
+    uncapped; returns raw if variance is zero.
     """
-    if len(port_returns) < 60:
-        return port_returns
-    cum_std = pd.Series(port_returns).expanding(min_periods=60).std() * math.sqrt(252)
-    cum_std = cum_std.shift(1).to_numpy().copy()
-    min_vol = vol_target / _MAX_PORTFOLIO_SCALE
-    effective_vol = np.where(np.isnan(cum_std), min_vol, cum_std)
-    effective_vol = np.maximum(effective_vol, min_vol)
-    scale = np.minimum(vol_target / effective_vol, _MAX_PORTFOLIO_SCALE)
-    scale[:60] = 1.0
-    return port_returns * scale
+    arr = np.asarray(port_returns, dtype=np.float64)
+    if len(arr) < 2:
+        return arr
+    realized = arr.std(ddof=1) * math.sqrt(252)
+    if not np.isfinite(realized) or realized <= 0.0:
+        return arr
+    return arr * (vol_target / realized)
 
 
 def _dump_series_csv(
@@ -425,7 +419,7 @@ def build_feature_frame(symbols: list[str]) -> pd.DataFrame:
     warmed up by the time the training split begins.
     """
     fetch_start = str(int(TRAIN_START[:4]) - 2) + TRAIN_START[4:]
-    bars = fetch_bars(symbols, start=fetch_start, end=TEST_END)
+    bars = load_bars(symbols, start=fetch_start, end=TEST_END)
     return FeatureBuilder().transform(bars)
 
 
@@ -499,14 +493,14 @@ def run_experiment(
     agent_factories = _make_agent_factories(device)
 
     # Resolve symbols and asset classes
-    universe = UNIVERSE
+    universe = ACTIVE_UNIVERSE
     if symbols is not None:
-        known_syms = {u["symbol"] for u in UNIVERSE}
+        known_syms = {u["symbol"] for u in ACTIVE_UNIVERSE}
         unknown = [s for s in symbols if s not in known_syms]
         if unknown:
             raise ValueError(f"Unknown symbols not in UNIVERSE: {unknown}")
         sym_set = set(symbols)
-        universe = [u for u in UNIVERSE if u["symbol"] in sym_set]
+        universe = [u for u in ACTIVE_UNIVERSE if u["symbol"] in sym_set]
 
     requested_symbols = [u["symbol"] for u in universe]
 

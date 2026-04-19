@@ -9,7 +9,7 @@ import torch.nn as nn
 class LSTMEncoder(nn.Module):
     """2-layer LSTM: 64 -> 32 units. Input (batch, seq_len, 10) -> (batch, 32)."""
 
-    def __init__(self, n_features: int = 11, dropout: float = 0.2):
+    def __init__(self, n_features: int = 10, dropout: float = 0.2):
         super().__init__()
         self.lstm1 = nn.LSTM(n_features, 64, num_layers=1, batch_first=True)
         self.dropout = nn.Dropout(dropout)
@@ -27,7 +27,7 @@ class LSTMEncoder(nn.Module):
 class DQNNetwork(nn.Module):
     """Dueling DQN: LSTM encoder -> value + advantage streams -> Q-values."""
 
-    def __init__(self, n_features: int = 11, n_actions: int = 3):
+    def __init__(self, n_features: int = 10, n_actions: int = 3):
         super().__init__()
         self.encoder = LSTMEncoder(n_features)
         self.value_head = nn.Linear(32, 1)
@@ -43,7 +43,7 @@ class DQNNetwork(nn.Module):
 class PGNetwork(nn.Module):
     """Policy Gradient (REINFORCE): LSTM encoder -> raw logits."""
 
-    def __init__(self, n_features: int = 11, n_actions: int = 3):
+    def __init__(self, n_features: int = 10, n_actions: int = 3):
         super().__init__()
         self.encoder = LSTMEncoder(n_features)
         self.head = nn.Linear(32, n_actions)
@@ -56,7 +56,7 @@ class PGNetwork(nn.Module):
 class A2CNetwork(nn.Module):
     """A2C: LSTM encoder -> actor (continuous mean via tanh) + critic (value)."""
 
-    def __init__(self, n_features: int = 11):
+    def __init__(self, n_features: int = 10):
         super().__init__()
         self.encoder = LSTMEncoder(n_features)
         self.actor = nn.Linear(32, 1)

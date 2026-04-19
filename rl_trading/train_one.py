@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from rl_trading.config import UNIVERSE, walk_forward_splits
+from rl_trading.config import ACTIVE_UNIVERSE, walk_forward_splits
 from rl_trading.env import TradingEnv
 from rl_trading.evaluate import (
     _collect_rl_test,
@@ -48,7 +48,7 @@ def _eligible_universe(feat: pd.DataFrame, seq_len: int) -> list[dict[str, str]]
     """Apply the same full-history filter used by the monolithic pipeline."""
     folds = walk_forward_splits()
     eligible, _ = _filter_full_history_universe(
-        UNIVERSE, feat, folds, min_rows=seq_len + 1,
+        ACTIVE_UNIVERSE, feat, folds, min_rows=seq_len + 1,
     )
     return eligible
 
@@ -78,7 +78,7 @@ def run_one(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Features
-    requested = [u["symbol"] for u in UNIVERSE]
+    requested = [u["symbol"] for u in ACTIVE_UNIVERSE]
     feat = load_or_build_feature_cache(requested, feature_cache)
 
     # Build agent + env config up-front so we know seq_len for the filter

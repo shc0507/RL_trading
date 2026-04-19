@@ -31,8 +31,10 @@ _SPLITS: dict[str, tuple[str, str]] = {
 # Discrete action → position mapping
 _ACTION_TO_POS = {0: -1.0, 1: 0.0, 2: 1.0}
 
-# State dimension: market features + current position
-STATE_DIM = len(FEATURE_COLS) + 1
+# State dimension: market features only (Zhang 2019 p.4 — 10 features; the
+# previous position is NOT part of the observation, only consumed internally
+# by the reward via A_{t-1} in Eq. 4).
+STATE_DIM = len(FEATURE_COLS)
 
 
 @dataclass
@@ -67,7 +69,6 @@ class TradingEnv:
         self._t: int = 0
         self._position: float = 0.0
         self._prev_vol_scale: float = 0.0
-        self._pos_history: np.ndarray | None = None
 
         # Episode history
         self.history: dict[str, list] = {}
@@ -108,7 +109,6 @@ class TradingEnv:
         self._t = max(self.cfg.seq_len - 1, 0)
         self._position = 0.0
         self._prev_vol_scale = 0.0
-        self._pos_history = np.zeros(len(self._data), dtype=np.float32)
 
         self.history = {
             "date": [],
@@ -145,17 +145,17 @@ class TradingEnv:
         price_t = self._prices[t]
         r_t = self._prices[t + 1] - price_t
 
-        # Annualized vol at time t-1 (paper uses σ_{t-1}, estimated before
-        # the current return is known).  t >= seq_len-1 >= 59 from reset,
-        # so t-1 >= 58 is always valid; guard included for safety.
-        vol_idx = t - 1 if t >= 1 else 0
-        ann_vol_t = self._ewm_vol[vol_idx] * math.sqrt(252)
-        # Guard against NaN vol → don't trade; cap vol_scale to avoid
-        # blow-up when vol is near zero.
+        # Paper Eq. 4: A_{t-1} uses σ_{t-1}, the ex-ante vol known at the
+        # moment the position is chosen. In this env, the action picked at
+        # code-index t earns prices[t+1]-prices[t], so the matching "decision
+        # time" is code-index t itself. ewm_vol[t] uses pct_change through t,
+        # i.e., information available once close[t] has been observed.
+        ann_vol_t = self._ewm_vol[t] * math.sqrt(252)
+        # Guard against NaN or non-positive vol → don't trade this bar.
         if np.isnan(ann_vol_t) or ann_vol_t <= 0.0:
             vol_scale = 0.0
         else:
-            vol_scale = min(self.cfg.vol_target / ann_vol_t, 10.0)
+            vol_scale = self.cfg.vol_target / ann_vol_t
 
         # Reward per Zhang et al. Eq. 4 (additive profits, σ_{t-1}):
         # R_t = (σ_tgt / σ_{t-1}) · A_t · (p_t - p_{t-1})
@@ -176,11 +176,6 @@ class TradingEnv:
         for k, v in info.items():
             self.history[k].append(v)
 
-        # Update state — write position into current AND next slot so that
-        # _get_state() at t+1 sees the current position as pos_col[-1].
-        self._pos_history[self._t] = position
-        if self._t + 1 < len(self._pos_history):
-            self._pos_history[self._t + 1] = position
         self._position = position
         self._prev_vol_scale = vol_scale
         self._t += 1
@@ -194,14 +189,11 @@ class TradingEnv:
     # ── Internals ───────────────────────────────────────────────────
 
     def _get_state(self) -> np.ndarray:
-        """Return the current state observation (market features + position history)."""
+        """Return the current observation: the 10 market features (Zhang 2019)."""
         if self.cfg.seq_len <= 1:
-            return np.append(self._features[self._t], np.float32(self._position))
-        # Sequence of past states for LSTM, with actual position at each timestep
+            return self._features[self._t].copy()
         start = self._t - self.cfg.seq_len + 1
-        seq = self._features[start : self._t + 1]  # (seq_len, n_features)
-        pos_col = self._pos_history[start : self._t + 1].reshape(-1, 1)
-        return np.concatenate([seq, pos_col], axis=1)  # (seq_len, n_features+1)
+        return self._features[start : self._t + 1].copy()  # (seq_len, n_features)
 
     def _decode_action(self, action) -> float:
         if self.cfg.action_mode == "discrete":

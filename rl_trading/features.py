@@ -38,14 +38,20 @@ def _phi(x: pd.Series) -> pd.Series:
 
 
 def _rsi(close: pd.Series, window: int) -> pd.Series:
-    """Standard RSI scaled to [0, 1]."""
+    """Wilder (1978) RSI on 0..100 scale, per Zhang 2019 p.4.
+
+    Wilder's smoother is the recursive EMA with α=1/n (equivalent to
+    pandas ``ewm(alpha=1/n, adjust=False)``), NOT ``span=n`` which gives
+    α=2/(n+1) ≈ 2× faster.
+    """
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(span=window, min_periods=window, adjust=False).mean()
-    avg_loss = loss.ewm(span=window, min_periods=window, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    return rs / (1 + rs)  # equivalent to RSI/100
+    avg_gain = gain.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+    avg_loss = loss.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+    # Guard against all-gain runs where avg_loss == 0 → rs = inf → NaN.
+    rsi = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss.replace(0.0, np.nan))
+    return rsi.where(avg_loss > 0, 100.0)
 
 
 def _compute_symbol_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -72,12 +78,14 @@ def _compute_symbol_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f"ret_{h}"] = cum_ret
         df[f"ret_{h}_vol"] = cum_ret / ann_vol
 
-    # MACD for each scale pair
+    # MACD for each scale pair. adjust=False gives the recursive EMA
+    # (Baz/Zhang convention); pandas' default adjust=True differs during
+    # warm-up due to finite-sample weighting.
     price_std = close.rolling(MACD_PRICE_STD_WINDOW, min_periods=MACD_PRICE_STD_WINDOW).std()
     macd_values: list[pd.Series] = []
     for short, long in MACD_WINDOWS:
-        ema_s = close.ewm(span=short, min_periods=short).mean()
-        ema_l = close.ewm(span=long, min_periods=long).mean()
+        ema_s = close.ewm(span=short, min_periods=short, adjust=False).mean()
+        ema_l = close.ewm(span=long, min_periods=long, adjust=False).mean()
         q = (ema_s - ema_l) / price_std
         q_std = q.rolling(MACD_NORMALIZATION_WINDOW, min_periods=MACD_NORMALIZATION_WINDOW).std()
         macd = q / q_std

@@ -22,7 +22,7 @@ class DQNAgent:
 
     def __init__(
         self,
-        n_features: int = 11,
+        n_features: int = 10,
         lr: float = 1e-4,
         gamma: float = 0.3,
         batch_size: int = 64,
@@ -140,7 +140,7 @@ class PGAgent:
 
     def __init__(
         self,
-        n_features: int = 11,
+        n_features: int = 10,
         lr: float = 1e-4,
         gamma: float = 0.3,
         device: str = "cpu",
@@ -187,8 +187,9 @@ class PGAgent:
             returns.insert(0, g)
         returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
 
-        # Baseline: subtract mean
-        returns = returns - returns.mean()
+        # Paper Eq. 6 is vanilla REINFORCE (no baseline); mean-subtraction
+        # is a common variance-reduction trick but is not what the paper
+        # reports for the "PG" row in Exhibit 2.
 
         s = torch.tensor(np.array(self.states), dtype=torch.float32, device=self.device)
         a = torch.tensor(self.actions, dtype=torch.long, device=self.device)
@@ -233,13 +234,13 @@ class A2CAgent:
 
     def __init__(
         self,
-        n_features: int = 11,
+        n_features: int = 10,
         lr_actor: float = 1e-4,
         lr_critic: float = 1e-3,
         batch_size: int = 128,
         gamma: float = 0.3,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0.0,  # Paper does not use an entropy bonus.
         device: str = "cpu",
     ):
         self.device = torch.device(device)
