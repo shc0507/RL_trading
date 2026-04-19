@@ -88,16 +88,25 @@ class DQNAgent:
         ns = torch.tensor(np.array(next_states), dtype=torch.float32, device=self.device)
         d = torch.tensor(dones, dtype=torch.float32, device=self.device)
 
+        # Switch to train mode before the gradient forward. select_action leaves
+        # online in eval, and cuDNN RNN requires train mode for backward.
+        self.online.train()
+
         # Double DQN: online selects action, target evaluates
         q_vals = self.online(s).gather(1, a.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
+            # Bootstrap argmax in eval mode so dropout doesn't randomize
+            # the action the target network is asked to value.
+            self.online.eval()
             best_actions = self.online(ns).argmax(dim=1)
+            self.online.train()
             q_next = self.target(ns).gather(1, best_actions.unsqueeze(1)).squeeze(1)
             targets = r + self.gamma * q_next * (1 - d)
 
         loss = nn.functional.mse_loss(q_vals, targets)
         self.optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         self.grad_step_count += 1
@@ -192,6 +201,7 @@ class PGAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         self.last_stats = {

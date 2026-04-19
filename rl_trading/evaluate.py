@@ -296,6 +296,153 @@ def _print_universe_summary(
         )
 
 
+def aggregate_and_report(
+    results: dict[str, dict[str, pd.Series]],
+    raw_daily: dict[str, dict[str, pd.Series]],
+    *,
+    class_symbols: dict[str, list[str]],
+    all_symbols: list[str],
+    method_names: list[str],
+    out_dir: Path,
+    logger: "WandbLogger | None" = None,
+) -> pd.DataFrame:
+    """Portfolio aggregation + metrics + CSV + plots.
+
+    Extracted from run_experiment so both the monolithic pipeline and the
+    offline aggregator (rl_trading.aggregate) can share the reporting logic.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    groupings: dict[str, list[str]] = dict(class_symbols)
+    groupings["All"] = all_symbols
+
+    portfolio_rewards: dict[str, dict[str, pd.Series]] = {}
+    portfolio_rewards_scaled: dict[str, dict[str, pd.Series]] = {}
+    portfolio_raw: dict[str, dict[str, pd.Series]] = {}
+
+    for grp_name, grp_syms in groupings.items():
+        portfolio_rewards[grp_name] = {}
+        portfolio_rewards_scaled[grp_name] = {}
+        portfolio_raw[grp_name] = {}
+        for method in method_names:
+            series = []
+            raw_series = []
+            for sym in grp_syms:
+                r = results.get(sym, {}).get(method, pd.Series(dtype=np.float64))
+                if len(r) > 0:
+                    series.append(r.rename(sym))
+                f = raw_daily.get(sym, {}).get(method, pd.Series(dtype=np.float64))
+                if len(f) > 0:
+                    raw_series.append(f.rename(sym))
+            if series:
+                combined = pd.concat(series, axis=1, join="outer").sort_index()
+                port = combined.mean(axis=1).dropna()
+                portfolio_rewards[grp_name][method] = port
+                scaled = _portfolio_vol_scale(port.to_numpy())
+                portfolio_rewards_scaled[grp_name][method] = pd.Series(
+                    scaled, index=port.index,
+                )
+            else:
+                portfolio_rewards[grp_name][method] = pd.Series(dtype=np.float64)
+                portfolio_rewards_scaled[grp_name][method] = pd.Series(dtype=np.float64)
+            if raw_series:
+                combined_raw = pd.concat(raw_series, axis=1, join="outer").sort_index()
+                portfolio_raw[grp_name][method] = combined_raw.mean(axis=1).dropna()
+            else:
+                portfolio_raw[grp_name][method] = pd.Series(dtype=np.float64)
+
+    col_order = ["Group", "Method", "E(R)", "Std(R)", "DD", "Sharpe",
+                 "Sortino", "MDD", "Calmar", "%+Ret", "AvgP/AvgL"]
+
+    def _metrics_from(nested: dict[str, dict[str, pd.Series]]) -> pd.DataFrame:
+        rows = []
+        for grp_name in groupings:
+            for method in method_names:
+                r = nested[grp_name].get(method, pd.Series(dtype=np.float64))
+                m = compute_metrics(r.to_numpy())
+                m["Group"] = grp_name
+                m["Method"] = method
+                rows.append(m)
+        return pd.DataFrame(rows)[col_order]
+
+    metrics_df = _metrics_from(portfolio_rewards_scaled)
+    metrics_df_raw = _metrics_from(portfolio_rewards)
+
+    print(f"\n{'='*60}")
+    print("Results — Table 2 (portfolio-level vol scaling applied)")
+    print(f"{'='*60}")
+    _print_table(metrics_df)
+    print(f"\n{'='*60}")
+    print("Results — Table 3 (no portfolio-level vol scaling)")
+    print(f"{'='*60}")
+    _print_table(metrics_df_raw)
+
+    metrics_df.to_csv(out_dir / "results.csv", index=False, float_format="%.4f")
+    metrics_df_raw.to_csv(out_dir / "results_unscaled.csv", index=False, float_format="%.4f")
+    print(f"\nResults saved to {out_dir / 'results.csv'} and {out_dir / 'results_unscaled.csv'}")
+
+    _dump_series_csv(
+        portfolio_rewards_scaled, out_dir / "portfolio_zhang.csv",
+        key_col="group", value_col="reward_scaled",
+    )
+    _dump_series_csv(
+        portfolio_rewards, out_dir / "portfolio_zhang_unscaled.csv",
+        key_col="group", value_col="reward",
+    )
+    _dump_series_csv(
+        portfolio_raw, out_dir / "portfolio_raw.csv",
+        key_col="group", value_col="frac_return",
+    )
+    _dump_series_csv(
+        results, out_dir / "per_symbol_zhang.csv",
+        key_col="symbol", value_col="reward_scaled",
+    )
+    _dump_series_csv(
+        raw_daily, out_dir / "per_symbol_raw.csv",
+        key_col="symbol", value_col="frac_return",
+    )
+
+    fig = _plot_cumulative(portfolio_rewards_scaled, groupings, method_names, out_dir)
+    fig_raw = _plot_cumulative_raw(portfolio_raw, groupings, method_names, out_dir)
+
+    try:
+        if logger is not None:
+            logger.log_table("final/metrics_table", metrics_df)
+            logger.log_image("final/cumulative_returns", fig)
+            logger.log_image("final/cumulative_return_raw", fig_raw)
+    finally:
+        plt.close(fig)
+        plt.close(fig_raw)
+
+    return metrics_df
+
+
+def build_feature_frame(symbols: list[str]) -> pd.DataFrame:
+    """Fetch bars and build the feature frame used by training and evaluation.
+
+    Fetch starts two years before TRAIN_START so rolling-window features are
+    warmed up by the time the training split begins.
+    """
+    fetch_start = str(int(TRAIN_START[:4]) - 2) + TRAIN_START[4:]
+    bars = fetch_bars(symbols, start=fetch_start, end=TEST_END)
+    return FeatureBuilder().transform(bars)
+
+
+def load_or_build_feature_cache(
+    symbols: list[str],
+    cache_path: str | Path,
+) -> pd.DataFrame:
+    """Read a prebuilt feature parquet if it exists, else build and cache it."""
+    cache_path = Path(cache_path)
+    if cache_path.exists():
+        return pd.read_parquet(cache_path)
+    feat = build_feature_frame(symbols)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    feat.to_parquet(cache_path, index=False)
+    return feat
+
+
 def _print_failures(
     failures: list[tuple[str, str, str]],
     *,
@@ -326,6 +473,7 @@ def run_experiment(
     wandb_name: str | None = None,
     wandb_tags: list[str] | None = None,
     preflight_only: bool = False,
+    feature_cache_path: str | Path | None = None,
 ):
     """Run the full Zhang et al. experiment.
 
@@ -338,6 +486,8 @@ def run_experiment(
     output_dir : directory for output CSV and PNG.
     walk_forward : if True, use expanding-window walk-forward folds
         instead of a single train/val/test split.
+    feature_cache_path : optional path to a prebuilt feature parquet. If it
+        exists, features are loaded from disk instead of refetching.
     """
     if agents is None:
         agents = ["dqn", "pg", "a2c"]
@@ -363,13 +513,14 @@ def run_experiment(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Fetch data and build features
-    print("Fetching data ...")
-    fetch_start = str(int(TRAIN_START[:4]) - 2) + TRAIN_START[4:]
-    bars = fetch_bars(requested_symbols, start=fetch_start, end=TEST_END)
-    print("Building features ...")
-    fb = FeatureBuilder()
-    feat = fb.transform(bars)
+    # 1. Fetch data and build features (or reuse prebuilt cache)
+    if feature_cache_path is not None:
+        print(f"Loading feature cache: {feature_cache_path}")
+        feat = load_or_build_feature_cache(requested_symbols, feature_cache_path)
+        feat = feat.loc[feat["symbol"].isin(requested_symbols)].reset_index(drop=True)
+    else:
+        print("Fetching data and building features ...")
+        feat = build_feature_frame(requested_symbols)
 
     # 2. Determine folds
     if walk_forward:
@@ -549,124 +700,17 @@ def run_experiment(
                 f"Aborting result generation after {len(fatal_failures)} post-filter failures."
             )
 
-        # 5. Aggregate portfolios
-        print(f"\n{'='*60}")
-        print("Aggregating portfolios ...")
-        print(f"{'='*60}")
-
-        groupings: dict[str, list[str]] = dict(class_symbols)
-        groupings["All"] = all_symbols
-
-        # Table 3 style: equal-weight mean of per-contract σ_tgt-scaled rewards.
-        portfolio_rewards: dict[str, dict[str, pd.Series]] = {}
-        # Table 2 style: Table-3 series with an extra portfolio-level vol lift
-        # so methods with different natural vols (Long, DQN, A2C) are comparable.
-        portfolio_rewards_scaled: dict[str, dict[str, pd.Series]] = {}
-        portfolio_raw: dict[str, dict[str, pd.Series]] = {}
-
-        for grp_name, grp_syms in groupings.items():
-            portfolio_rewards[grp_name] = {}
-            portfolio_rewards_scaled[grp_name] = {}
-            portfolio_raw[grp_name] = {}
-            for method in method_names:
-                series = []
-                raw_series = []
-                for sym in grp_syms:
-                    r = results.get(sym, {}).get(method, pd.Series(dtype=np.float64))
-                    if len(r) > 0:
-                        series.append(r.rename(sym))
-                    f = raw_daily.get(sym, {}).get(method, pd.Series(dtype=np.float64))
-                    if len(f) > 0:
-                        raw_series.append(f.rename(sym))
-                if series:
-                    combined = pd.concat(series, axis=1, join="outer").sort_index()
-                    port = combined.mean(axis=1).dropna()
-                    portfolio_rewards[grp_name][method] = port
-                    scaled = _portfolio_vol_scale(port.to_numpy())
-                    portfolio_rewards_scaled[grp_name][method] = pd.Series(
-                        scaled, index=port.index,
-                    )
-                else:
-                    portfolio_rewards[grp_name][method] = pd.Series(dtype=np.float64)
-                    portfolio_rewards_scaled[grp_name][method] = pd.Series(dtype=np.float64)
-                if raw_series:
-                    combined_raw = pd.concat(raw_series, axis=1, join="outer").sort_index()
-                    portfolio_raw[grp_name][method] = combined_raw.mean(axis=1).dropna()
-                else:
-                    portfolio_raw[grp_name][method] = pd.Series(dtype=np.float64)
-
-        # 6. Compute metrics tables (Table 2 = scaled, Table 3 = unscaled).
-        col_order = ["Group", "Method", "E(R)", "Std(R)", "DD", "Sharpe",
-                     "Sortino", "MDD", "Calmar", "%+Ret", "AvgP/AvgL"]
-
-        def _metrics_from(nested: dict[str, dict[str, pd.Series]]) -> pd.DataFrame:
-            rows = []
-            for grp_name in groupings:
-                for method in method_names:
-                    r = nested[grp_name].get(method, pd.Series(dtype=np.float64))
-                    m = compute_metrics(r.to_numpy())
-                    m["Group"] = grp_name
-                    m["Method"] = method
-                    rows.append(m)
-            return pd.DataFrame(rows)[col_order]
-
-        metrics_df = _metrics_from(portfolio_rewards_scaled)
-        metrics_df_raw = _metrics_from(portfolio_rewards)
-
-        # 7. Print results tables
-        print(f"\n{'='*60}")
-        print("Results — Table 2 (portfolio-level vol scaling applied)")
-        print(f"{'='*60}")
-        _print_table(metrics_df)
-        print(f"\n{'='*60}")
-        print("Results — Table 3 (no portfolio-level vol scaling)")
-        print(f"{'='*60}")
-        _print_table(metrics_df_raw)
-
-        metrics_df.to_csv(out_dir / "results.csv", index=False, float_format="%.4f")
-        metrics_df_raw.to_csv(out_dir / "results_unscaled.csv", index=False, float_format="%.4f")
-        print(f"\nResults saved to {out_dir / 'results.csv'} and {out_dir / 'results_unscaled.csv'}")
-
-        # 7b. Dump tidy raw data for offline replotting
-        _dump_series_csv(
-            portfolio_rewards_scaled, out_dir / "portfolio_zhang.csv",
-            key_col="group", value_col="reward_scaled",
+        # 5-8. Aggregate portfolios, compute metrics, dump CSVs, plot.
+        metrics_df = aggregate_and_report(
+            results, raw_daily,
+            class_symbols=dict(class_symbols),
+            all_symbols=all_symbols,
+            method_names=method_names,
+            out_dir=out_dir,
+            logger=logger,
         )
-        _dump_series_csv(
-            portfolio_rewards, out_dir / "portfolio_zhang_unscaled.csv",
-            key_col="group", value_col="reward",
-        )
-        _dump_series_csv(
-            portfolio_raw, out_dir / "portfolio_raw.csv",
-            key_col="group", value_col="frac_return",
-        )
-        _dump_series_csv(
-            results, out_dir / "per_symbol_zhang.csv",
-            key_col="symbol", value_col="reward_scaled",
-        )
-        _dump_series_csv(
-            raw_daily, out_dir / "per_symbol_raw.csv",
-            key_col="symbol", value_col="frac_return",
-        )
-
-        # 8. Plot cumulative trade returns.
-        # Paper's Figure 1 is paired with Table 2, so headline plot uses the
-        # portfolio-vol-scaled series.
-        fig = _plot_cumulative(portfolio_rewards_scaled, groupings, method_names, out_dir)
-        fig_raw = _plot_cumulative_raw(portfolio_raw, groupings, method_names, out_dir)
-
-        # 9. Final wandb artifacts
-        if logger is not None:
-            logger.log_table("final/metrics_table", metrics_df)
-            logger.log_image("final/cumulative_returns", fig)
-            logger.log_image("final/cumulative_return_raw", fig_raw)
-
         return metrics_df
     finally:
-        if fig is not None:
-            plt.close(fig)
-        if fig_raw is not None:
-            plt.close(fig_raw)
         if logger is not None:
             logger.finish()
 
