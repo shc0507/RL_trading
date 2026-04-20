@@ -110,6 +110,17 @@ class TradingEnv:
         self._position = 0.0
         self._prev_vol_scale = 0.0
 
+        # Per-contract reward normalization (Zhang p.5 μ knob). Paper sets
+        # μ=1 uniformly, but then absolute dollar rewards scale with the
+        # contract's price level — under RAD this differs by ~100× across
+        # commodity contracts (DA $20 vs LB $3600). The equal-weight
+        # portfolio becomes dollar-weighted, which flips baseline signs
+        # (e.g. FX Long) and dominates gradients on high-priced contracts.
+        # Use μ_i = 1/p_ref with p_ref = first episode price; this makes
+        # rewards roughly dimensionless (≈ pct-return scale) and brings
+        # the portfolio mean into true equal-weight.
+        self._ref_price = float(self._prices[0]) if self._prices[0] > 0 else 1.0
+
         self.history = {
             "date": [],
             "price": [],
@@ -152,17 +163,21 @@ class TradingEnv:
         # i.e., information available once close[t] has been observed.
         ann_vol_t = self._ewm_vol[t] * math.sqrt(252)
         # Guard against NaN or non-positive vol → don't trade this bar.
+        # Soft σ floor of 1% annualized: paper is uncapped, but traded
+        # futures rarely have realized vol < 1% (bid-ask + roll noise).
+        # Prevents pathological vol_scale on ultra-quiet bars without
+        # materially changing sizing for normal contracts.
         if np.isnan(ann_vol_t) or ann_vol_t <= 0.0:
             vol_scale = 0.0
         else:
-            vol_scale = self.cfg.vol_target / ann_vol_t
+            vol_scale = self.cfg.vol_target / max(ann_vol_t, 0.01)
 
-        # Reward per Zhang et al. Eq. 4 (additive profits, σ_{t-1}):
-        # R_t = (σ_tgt / σ_{t-1}) · A_t · (p_t - p_{t-1})
-        #     - bp · p_t · |σ_tgt/σ_{t-1} · A_t - σ_tgt/σ_{t-2} · A_{t-1}|
+        # Reward per Zhang et al. Eq. 4 (additive profits, σ_{t-1}),
+        # then divided by ref_price so per-contract rewards are on a
+        # common dimensionless scale (see reset() for the rationale).
         position_return = vol_scale * position * r_t
         tc = self._bp * price_t * abs(vol_scale * position - self._prev_vol_scale * self._position)
-        reward = position_return - tc
+        reward = (position_return - tc) / self._ref_price
 
         # Record history
         info = {

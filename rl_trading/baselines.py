@@ -102,20 +102,22 @@ def compute_baseline_rewards(
     rewards = np.empty(n, dtype=np.float64)
     prev_pos = 0.0
     prev_vol_scale = 0.0
+    # Must mirror env.py: σ at decision-time index t, 1% σ floor, and
+    # per-contract μ = 1/p_ref price normalization.
+    ref_price = float(prices[0]) if prices[0] > 0 else 1.0
 
     for t in range(n):
         daily_ret = prices[t + 1] - prices[t]
-        vol_idx = max(t - 1, 0)
-        ann_vol = ewm_vol[vol_idx] * math.sqrt(252)
+        ann_vol = ewm_vol[t] * math.sqrt(252)
         if np.isnan(ann_vol) or ann_vol <= 0.0:
             vol_scale = 0.0
         else:
-            vol_scale = min(vol_target / ann_vol, 10.0)
+            vol_scale = vol_target / max(ann_vol, 0.01)
 
         pos = positions[t]
         position_return = vol_scale * pos * daily_ret
         tc = bp * prices[t] * abs(vol_scale * pos - prev_vol_scale * prev_pos)
-        rewards[t] = position_return - tc
+        rewards[t] = (position_return - tc) / ref_price
         prev_pos = pos
         prev_vol_scale = vol_scale
 
