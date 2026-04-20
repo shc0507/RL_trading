@@ -53,17 +53,18 @@ class Trainer:
             self.logger.define_context(self.context)
 
     def train(self) -> dict:
-        """Run full training loop with multi-metric OR patience.
+        """Run full training loop with Sharpe-only early stopping (Zhang p.7).
 
-        Tracks three val metrics (Sharpe, Sortino, cumulative reward) with
-        independent staleness counters. Stops when ALL three have been stale
-        for ``cfg.patience`` epochs — any one metric improving resets only
-        its own counter. Checkpoint is saved on Sharpe improvement (the
-        paper's primary selector).
+        Monitors val Sharpe only; stops if it has been stale for
+        ``cfg.patience`` epochs (paper: 20). Checkpoint saved on every
+        Sharpe improvement. Val Sortino / cumulative reward are still
+        computed and logged for diagnostics but do not gate early stop.
         """
-        best = {"sharpe": -np.inf, "sortino": -np.inf, "cum_return": -np.inf}
-        wait = {"sharpe": 0, "sortino": 0, "cum_return": 0}
-        best_epoch = 0  # tracks the Sharpe-best checkpoint
+        best_sharpe = -np.inf
+        best_sortino = -np.inf
+        best_cum = -np.inf
+        wait = 0
+        best_epoch = 0
 
         for epoch in range(1, self.cfg.n_epochs + 1):
             # Train one episode per symbol (shuffled to avoid order effects)
@@ -90,30 +91,27 @@ class Trainer:
                     val_sharpes.append(m["sharpe"])
                     val_sortinos.append(m["sortino"])
                     val_cum_returns.append(m["total_reward"])
-                current = {
-                    "sharpe": float(np.mean(val_sharpes)),
-                    "sortino": float(np.mean(val_sortinos)),
-                    "cum_return": float(np.mean(val_cum_returns)),
-                }
+                cur_sharpe = float(np.mean(val_sharpes))
+                cur_sortino = float(np.mean(val_sortinos))
+                cur_cum = float(np.mean(val_cum_returns))
 
-                for k in best:
-                    if current[k] > best[k]:
-                        best[k] = current[k]
-                        wait[k] = 0
-                        if k == "sharpe":
-                            best_epoch = epoch
-                            self.agent.save(self._ckpt_dir / f"{self.label}_best.pt")
-                    else:
-                        wait[k] += 1
+                if cur_sharpe > best_sharpe:
+                    best_sharpe = cur_sharpe
+                    best_epoch = epoch
+                    wait = 0
+                    self.agent.save(self._ckpt_dir / f"{self.label}_best.pt")
+                else:
+                    wait += 1
+                best_sortino = max(best_sortino, cur_sortino)
+                best_cum = max(best_cum, cur_cum)
 
                 print(
                     f"Epoch {epoch:3d} | "
                     f"train reward={np.mean(train_rewards):+.4f} | "
-                    f"val sharpe={current['sharpe']:+.3f} "
-                    f"sortino={current['sortino']:+.3f} "
-                    f"cum={current['cum_return']:+.3f} | "
-                    f"wait S={wait['sharpe']:2d}/So={wait['sortino']:2d}/"
-                    f"C={wait['cum_return']:2d}"
+                    f"val sharpe={cur_sharpe:+.3f} "
+                    f"sortino={cur_sortino:+.3f} "
+                    f"cum={cur_cum:+.3f} | "
+                    f"wait={wait:2d}/{self.cfg.patience}"
                 )
 
                 if self.logger is not None and self.context is not None:
@@ -122,35 +120,33 @@ class Trainer:
                         "train/reward_sum": float(np.sum(train_rewards)),
                         "train/sharpe": float(np.mean(train_sharpes)),
                         "train/loss": float(np.mean(train_losses)),
-                        "val/sharpe": current["sharpe"],
-                        "val/sortino": current["sortino"],
-                        "val/cum_return": current["cum_return"],
-                        "best/val_sharpe": float(best["sharpe"]),
-                        "best/val_sortino": float(best["sortino"]),
-                        "best/val_cum_return": float(best["cum_return"]),
+                        "val/sharpe": cur_sharpe,
+                        "val/sortino": cur_sortino,
+                        "val/cum_return": cur_cum,
+                        "best/val_sharpe": float(best_sharpe),
+                        "best/val_sortino": float(best_sortino),
+                        "best/val_cum_return": float(best_cum),
                         "best/epoch": float(best_epoch),
-                        "early_stop/wait_sharpe": float(wait["sharpe"]),
-                        "early_stop/wait_sortino": float(wait["sortino"]),
-                        "early_stop/wait_cum_return": float(wait["cum_return"]),
+                        "early_stop/wait": float(wait),
                     }
                     for k, vs in agent_stats_acc.items():
                         if vs:
                             payload[f"agent/{k}"] = float(np.mean(vs))
                     self.logger.log(payload, ctx=self.context, epoch=epoch)
 
-                if all(w >= self.cfg.patience for w in wait.values()):
+                if wait >= self.cfg.patience:
                     print(
                         f"Early stopping at epoch {epoch} "
-                        f"(Sharpe/Sortino/Cum all stale for {self.cfg.patience}+ epochs; "
+                        f"(val Sharpe stale for {self.cfg.patience} epochs; "
                         f"Sharpe-best epoch={best_epoch})"
                     )
                     break
 
         return {
             "best_epoch": best_epoch,
-            "best_val_sharpe": best["sharpe"],
-            "best_val_sortino": best["sortino"],
-            "best_val_cum_return": best["cum_return"],
+            "best_val_sharpe": best_sharpe,
+            "best_val_sortino": best_sortino,
+            "best_val_cum_return": best_cum,
         }
 
     def _run_episode(self, symbol: str, split: str, train: bool = True) -> dict:
