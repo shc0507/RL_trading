@@ -58,10 +58,12 @@ def run_one(
     fold_idx: int,
     asset_class: str,
     *,
+    seed: int = 0,
     feature_cache: str | Path,
     output_dir: str | Path,
     n_epochs: int,
     patience: int,
+    early_stop_policy: str = "sharpe_only",
     device: str | None = None,
     wandb_enabled: bool = False,
     wandb_project: str = "rl-trading",
@@ -70,7 +72,16 @@ def run_one(
     wandb_tags: list[str] | None = None,
     wandb_group: str | None = None,
 ) -> dict:
-    """Train one (agent, fold, class) and dump results to output_dir."""
+    """Train one (agent, fold, class, seed) and dump results to output_dir."""
+    # Set every random source before any model init or env step.
+    import random as _random
+    import torch as _torch
+    _random.seed(seed)
+    np.random.seed(seed)
+    _torch.manual_seed(seed)
+    if _torch.cuda.is_available():
+        _torch.cuda.manual_seed_all(seed)
+
     if device is None:
         device = _detect_device()
 
@@ -104,25 +115,23 @@ def run_one(
         "agent": agent_name,
         "asset_class": asset_class,
         "fold_idx": fold_idx,
+        "seed": seed,
         "fold": {k: list(v) for k, v in fold.items()},
         "class_symbols": class_symbols,
         "n_epochs": n_epochs,
         "patience": patience,
+        "early_stop_policy": early_stop_policy,
         "device": device,
         "hparams": _extract_hparams(agent, env_cfg),
     }
-    # Collapse the 60-task parallel sweep in the wandb UI:
-    #   group    = run-id (all 60 tasks share the same group)
-    #   job_type = agent (3 job_types per group)
-    #   tags     add per-tuple filters (class_X, fold_N).
     per_tuple_tags = list(wandb_tags or []) + [
-        f"class:{asset_class}", f"fold:{fold_idx + 1}",
+        f"class:{asset_class}", f"fold:{fold_idx + 1}", f"seed:{seed}",
     ]
     logger = WandbLogger.init(
         enabled=wandb_enabled,
         project=wandb_project,
         entity=wandb_entity,
-        name=wandb_name or f"{agent_name}-{fold_label}",
+        name=wandb_name or f"{agent_name}-{fold_label}-s{seed}",
         tags=per_tuple_tags,
         config=wandb_config,
         group=wandb_group,
@@ -136,6 +145,7 @@ def run_one(
         "agent": agent_name,
         "fold_idx": fold_idx,
         "asset_class": asset_class,
+        "seed": seed,
         "train": list(fold["train"]),
         "val": list(fold["val"]),
         "test": list(fold["test"]),
@@ -150,6 +160,7 @@ def run_one(
             checkpoint_dir=str(ckpt_dir),
             train_dates=fold["train"],
             val_dates=fold["val"],
+            early_stop_policy=early_stop_policy,
         )
         ctx = f"{agent_name}/{asset_class}/fold{fold_idx + 1}"
         trainer = Trainer(
@@ -219,27 +230,32 @@ def run_one(
 
 _ASSET_CLASSES = ["commodity", "equity_index", "fixed_income", "fx"]
 _AGENTS = ["dqn", "pg", "a2c"]
+_N_SEEDS = 3  # multi-seed per (agent, fold, class); aggregator picks best by val Sharpe
 
 
-def _tuple_from_array_index(idx: int) -> tuple[str, int, str]:
-    """Decode a slurm array index 0..N-1 into (agent, fold_idx, asset_class)."""
+def _tuple_from_array_index(idx: int) -> tuple[str, int, str, int]:
+    """Decode a slurm array index 0..N-1 into (agent, fold_idx, asset_class, seed)."""
     folds = walk_forward_splits()
     n_folds = len(folds)
     n_classes = len(_ASSET_CLASSES)
-    per_agent = n_folds * n_classes
+    per_seed = n_folds * n_classes
+    per_agent = per_seed * _N_SEEDS
     total = per_agent * len(_AGENTS)
     if idx < 0 or idx >= total:
         raise ValueError(
             f"array_index {idx} out of range 0..{total - 1} "
-            f"(agents={len(_AGENTS)} x folds={n_folds} x classes={n_classes})"
+            f"(agents={len(_AGENTS)} x seeds={_N_SEEDS} x folds={n_folds} x classes={n_classes})"
         )
     agent_i, rem = divmod(idx, per_agent)
+    seed_i, rem = divmod(rem, per_seed)
     fold_i, class_i = divmod(rem, n_classes)
-    return _AGENTS[agent_i], fold_i, _ASSET_CLASSES[class_i]
+    return _AGENTS[agent_i], fold_i, _ASSET_CLASSES[class_i], seed_i
 
 
-def _canonical_output_dir(run_dir: Path, agent: str, fold_idx: int, asset_class: str) -> Path:
-    return Path(run_dir) / agent / f"{asset_class}_fold{fold_idx + 1}"
+def _canonical_output_dir(
+    run_dir: Path, agent: str, fold_idx: int, asset_class: str, seed: int,
+) -> Path:
+    return Path(run_dir) / agent / f"{asset_class}_fold{fold_idx + 1}_seed{seed}"
 
 
 def main():
@@ -260,7 +276,10 @@ def main():
                        help="Parent directory; output goes to "
                             "<run-dir>/<agent>/<class>_fold<n>")
     parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--patience", type=int, default=None,
+                        help="Override per-agent default patience")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for torch/numpy/random (overrides --array-index)")
     parser.add_argument("--device", default=None)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="rl-trading")
@@ -273,7 +292,7 @@ def main():
     args = parser.parse_args()
 
     if args.array_index is not None:
-        agent, fold_idx, asset_class = _tuple_from_array_index(args.array_index)
+        agent, fold_idx, asset_class, seed = _tuple_from_array_index(args.array_index)
     else:
         if args.agent is None or args.fold_idx is None or args.asset_class is None:
             parser.error(
@@ -281,24 +300,43 @@ def main():
                 "--agent / --fold-idx / --asset-class"
             )
         agent, fold_idx, asset_class = args.agent, args.fold_idx, args.asset_class
+        seed = args.seed if args.seed is not None else 0
+    if args.seed is not None:
+        seed = args.seed
+
+    # Per-agent default patience and early-stop policy.
+    # DQN/PG are slow learners under our settings → OR patience.
+    # A2C is the fastest learner → paper-literal Sharpe-only.
+    _DEFAULTS = {
+        "dqn": {"patience": 50, "policy": "or_multi"},
+        "pg":  {"patience": 50, "policy": "or_multi"},
+        "a2c": {"patience": 30, "policy": "sharpe_only"},
+    }
+    patience = args.patience if args.patience is not None else _DEFAULTS[agent]["patience"]
+    early_stop_policy = _DEFAULTS[agent]["policy"]
 
     if args.run_dir is not None:
-        output_dir = _canonical_output_dir(Path(args.run_dir), agent, fold_idx, asset_class)
+        output_dir = _canonical_output_dir(Path(args.run_dir), agent, fold_idx, asset_class, seed)
         wandb_group = args.wandb_group or Path(args.run_dir).name
     else:
         output_dir = Path(args.output_dir)
         wandb_group = args.wandb_group
 
-    print(f"Training tuple: agent={agent} fold={fold_idx + 1} class={asset_class}")
+    print(
+        f"Training tuple: agent={agent} fold={fold_idx + 1} class={asset_class} "
+        f"seed={seed} patience={patience} policy={early_stop_policy}"
+    )
     print(f"Output dir: {output_dir}")
     run_one(
         agent_name=agent,
         fold_idx=fold_idx,
         asset_class=asset_class,
+        seed=seed,
         feature_cache=args.feature_cache,
         output_dir=output_dir,
         n_epochs=args.epochs,
-        patience=args.patience,
+        patience=patience,
+        early_stop_policy=early_stop_policy,
         device=args.device,
         wandb_enabled=args.wandb,
         wandb_project=args.wandb_project,

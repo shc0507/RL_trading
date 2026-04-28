@@ -12,6 +12,7 @@ from rl_trading.config import (
     DEFAULT_COST_RATE_BP,
     DEFAULT_VOL_TARGET,
     OBSERVATION_WINDOW,
+    TEST_COST_RATE_BP,
     TRAIN_END,
     TRAIN_START,
     TEST_END,
@@ -41,8 +42,10 @@ STATE_DIM = len(FEATURE_COLS)
 class EnvConfig:
     action_mode: str = "discrete"  # "discrete" or "continuous"
     cost_rate_bp: float = DEFAULT_COST_RATE_BP
+    test_cost_rate_bp: float = TEST_COST_RATE_BP
     vol_target: float = DEFAULT_VOL_TARGET
     seq_len: int = OBSERVATION_WINDOW  # for LSTM sequence input
+    state_normalize: bool = True  # z-score features per window before feeding LSTM
 
 
 class TradingEnv:
@@ -58,6 +61,7 @@ class TradingEnv:
         """
         self.full_frame = feature_frame
         self.cfg = cfg or EnvConfig()
+        # _bp is (re)set per episode in reset(): training cost vs test cost.
         self._bp = self.cfg.cost_rate_bp / 10_000
 
         # Episode state (set in reset)
@@ -85,11 +89,21 @@ class TradingEnv:
         if cfg.seq_len > 1, a 2D array of shape (seq_len, n_features).
 
         If *start* and *end* are provided they override *split*.
+
+        Sets self._bp from cfg.cost_rate_bp for train/val and from
+        cfg.test_cost_rate_bp for test (or whenever start/end are given —
+        the canonical use of date overrides is the post-train test/eval).
         """
         if start is not None and end is not None:
             date_start, date_end = start, end
+            active_bp_rate = self.cfg.test_cost_rate_bp
         else:
             date_start, date_end = _SPLITS[split]
+            active_bp_rate = (
+                self.cfg.test_cost_rate_bp if split == "test"
+                else self.cfg.cost_rate_bp
+            )
+        self._bp = active_bp_rate / 10_000
         mask = (
             (self.full_frame["symbol"] == symbol)
             & (self.full_frame["window_ready"])
@@ -204,11 +218,25 @@ class TradingEnv:
     # ── Internals ───────────────────────────────────────────────────
 
     def _get_state(self) -> np.ndarray:
-        """Return the current observation: the 10 market features (Zhang 2019)."""
+        """Return the current observation: the 10 market features (Zhang 2019).
+
+        If ``cfg.state_normalize`` is True, z-score each feature column
+        within the observation window (mean and std over seq_len bars,
+        per feature). This is a standard LSTM stabilizer that the paper
+        does not specify but every working DRL trader uses; it makes the
+        agent robust to per-contract scale drift in features that aren't
+        already z-scored at construction (e.g. norm_close, ret_h_vol).
+        """
         if self.cfg.seq_len <= 1:
-            return self._features[self._t].copy()
-        start = self._t - self.cfg.seq_len + 1
-        return self._features[start : self._t + 1].copy()  # (seq_len, n_features)
+            x = self._features[self._t].copy()
+        else:
+            start = self._t - self.cfg.seq_len + 1
+            x = self._features[start : self._t + 1].copy()
+        if self.cfg.state_normalize and x.ndim == 2:
+            mu = x.mean(axis=0, keepdims=True)
+            sd = x.std(axis=0, keepdims=True) + 1e-6
+            x = (x - mu) / sd
+        return x
 
     def _decode_action(self, action) -> float:
         if self.cfg.action_mode == "discrete":

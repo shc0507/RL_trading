@@ -22,6 +22,10 @@ class TrainerConfig:
     checkpoint_dir: str = "checkpoints"
     train_dates: tuple[str, str] | None = None  # override default split dates
     val_dates: tuple[str, str] | None = None
+    # "sharpe_only" (paper-literal, single metric; good for A2C),
+    # or "or_multi" (Sharpe|Sortino|Cum all stale; longer training; helps
+    # slow learners DQN/PG).
+    early_stop_policy: str = "sharpe_only"
 
 
 class Trainer:
@@ -53,17 +57,30 @@ class Trainer:
             self.logger.define_context(self.context)
 
     def train(self) -> dict:
-        """Run full training loop with Sharpe-only early stopping (Zhang p.7).
+        """Run full training loop with configurable early stopping.
 
-        Monitors val Sharpe only; stops if it has been stale for
-        ``cfg.patience`` epochs (paper: 20). Checkpoint saved on every
-        Sharpe improvement. Val Sortino / cumulative reward are still
-        computed and logged for diagnostics but do not gate early stop.
+        ``cfg.early_stop_policy``:
+          - "sharpe_only": stop when val Sharpe has been stale for
+            ``cfg.patience`` epochs. Paper-literal (Zhang p.7).
+          - "or_multi": stop when val Sharpe AND Sortino AND cum-return
+            have ALL been stale for ``cfg.patience`` epochs. Slower
+            learners (DQN, PG) need this in our setup; we observed
+            best_epoch=1 collapses under sharpe_only.
+
+        Checkpoint is always saved on Sharpe improvement (the paper's
+        primary model-selection criterion). Sortino and Cum gate stopping
+        but do not select the checkpoint.
         """
+        policy = self.cfg.early_stop_policy
+        if policy not in ("sharpe_only", "or_multi"):
+            raise ValueError(f"early_stop_policy must be sharpe_only or or_multi; got {policy}")
+
         best_sharpe = -np.inf
         best_sortino = -np.inf
         best_cum = -np.inf
-        wait = 0
+        wait_sharpe = 0
+        wait_sortino = 0
+        wait_cum = 0
         best_epoch = 0
 
         for epoch in range(1, self.cfg.n_epochs + 1):
@@ -95,15 +112,38 @@ class Trainer:
                 cur_sortino = float(np.mean(val_sortinos))
                 cur_cum = float(np.mean(val_cum_returns))
 
+                # Always checkpoint on Sharpe improvement (paper-aligned).
                 if cur_sharpe > best_sharpe:
                     best_sharpe = cur_sharpe
                     best_epoch = epoch
-                    wait = 0
+                    wait_sharpe = 0
                     self.agent.save(self._ckpt_dir / f"{self.label}_best.pt")
                 else:
-                    wait += 1
-                best_sortino = max(best_sortino, cur_sortino)
-                best_cum = max(best_cum, cur_cum)
+                    wait_sharpe += 1
+                if cur_sortino > best_sortino:
+                    best_sortino = cur_sortino
+                    wait_sortino = 0
+                else:
+                    wait_sortino += 1
+                if cur_cum > best_cum:
+                    best_cum = cur_cum
+                    wait_cum = 0
+                else:
+                    wait_cum += 1
+
+                if policy == "sharpe_only":
+                    stop_now = wait_sharpe >= self.cfg.patience
+                    wait_str = f"{wait_sharpe:2d}/{self.cfg.patience}"
+                else:  # or_multi
+                    stop_now = (
+                        wait_sharpe >= self.cfg.patience
+                        and wait_sortino >= self.cfg.patience
+                        and wait_cum >= self.cfg.patience
+                    )
+                    wait_str = (
+                        f"S={wait_sharpe:2d}/So={wait_sortino:2d}/"
+                        f"C={wait_cum:2d} (need all >= {self.cfg.patience})"
+                    )
 
                 print(
                     f"Epoch {epoch:3d} | "
@@ -111,7 +151,7 @@ class Trainer:
                     f"val sharpe={cur_sharpe:+.3f} "
                     f"sortino={cur_sortino:+.3f} "
                     f"cum={cur_cum:+.3f} | "
-                    f"wait={wait:2d}/{self.cfg.patience}"
+                    f"wait={wait_str}"
                 )
 
                 if self.logger is not None and self.context is not None:
@@ -127,17 +167,19 @@ class Trainer:
                         "best/val_sortino": float(best_sortino),
                         "best/val_cum_return": float(best_cum),
                         "best/epoch": float(best_epoch),
-                        "early_stop/wait": float(wait),
+                        "early_stop/wait_sharpe": float(wait_sharpe),
+                        "early_stop/wait_sortino": float(wait_sortino),
+                        "early_stop/wait_cum_return": float(wait_cum),
                     }
                     for k, vs in agent_stats_acc.items():
                         if vs:
                             payload[f"agent/{k}"] = float(np.mean(vs))
                     self.logger.log(payload, ctx=self.context, epoch=epoch)
 
-                if wait >= self.cfg.patience:
+                if stop_now:
                     print(
                         f"Early stopping at epoch {epoch} "
-                        f"(val Sharpe stale for {self.cfg.patience} epochs; "
+                        f"(policy={policy}, patience={self.cfg.patience}; "
                         f"Sharpe-best epoch={best_epoch})"
                     )
                     break

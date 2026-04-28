@@ -17,18 +17,22 @@ RETURN_HORIZONS: tuple[int, ...] = (21, 42, 63, 252)
 ANNUALIZATION_FACTOR: int = 252
 
 # ── Trading defaults ─────────────────────────────────────────────────
-# Env-level vol target used inside the reward (Eq. 4): scales per-bar
-# rewards to ~15% annualized vol per contract. Kept at 0.15 because
-# PG/A2C diverge when training on dollar-unit rewards amplified by
-# σ_tgt ≫ daily_sigma (observed: NaN in softmax / Normal(loc=NaN) with
-# σ_tgt=1.0 on commodity contracts).
-DEFAULT_VOL_TARGET: float = 0.15
+# Env-level vol target used inside the reward (Eq. 4). With per-contract
+# μ=1/p_ref normalization (env.py) the reward magnitude no longer
+# couples to price level, so σ_tgt=1.0 gives a richer training signal
+# without blowing up gradients.
+DEFAULT_VOL_TARGET: float = 1.0
 # Portfolio-level vol target applied at REPORTING time only (Zhang
 # Exhibit 2 appears to target ≈1.0 so Std(R) ≈ 0.97 across methods).
 # Scale-invariant metrics (Sharpe, Sortino, Calmar) are unaffected.
 PORTFOLIO_VOL_TARGET: float = 1.0
+# Two cost rates: low cost during training (gives PG/DQN signal-to-noise
+# room to learn), paper-spec 20 bp at evaluation. Paper trains at 20 bp
+# uniformly but does not report training-stability data; we treat the
+# train cost as a hyperparameter.
+DEFAULT_COST_RATE_BP: float = 2.0  # basis points, used during training
+TEST_COST_RATE_BP: float = 20.0  # basis points, used at evaluation
 # Paper Exhibit 1: bp = 0.0020 (= 20 basis points; paper defines 1 bp = 0.0001).
-DEFAULT_COST_RATE_BP: float = 20.0  # basis points
 
 # ── Train / val / test splits ────────────────────────────────────────
 # Paper test horizon ends 2019-12-31; anything beyond is post-paper extension.

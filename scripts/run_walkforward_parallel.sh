@@ -13,7 +13,7 @@
 #   RUN_ID       label for the run (defaults to the stage-2 array job id)
 #   EPOCHS       stage-2 epochs (default 200)
 #   PATIENCE     stage-2 patience (default 20)
-#   ARRAY_LIMIT  restrict stage-2 array to 0..N-1 (default 24 = full sweep: 3 agents x 2 folds x 4 classes)
+#   ARRAY_LIMIT  restrict stage-2 array to 0..N-1 (default 72 = full sweep: 3 agents x 2 folds x 4 classes x 3 seeds)
 #   WANDB        0 to disable wandb, 1 to enable (default 1)
 
 set -euo pipefail
@@ -22,7 +22,7 @@ mkdir -p logs artifacts
 
 EPOCHS="${EPOCHS:-200}"
 PATIENCE="${PATIENCE:-20}"
-ARRAY_LIMIT="${ARRAY_LIMIT:-24}"
+ARRAY_LIMIT="${ARRAY_LIMIT:-72}"
 WANDB="${WANDB:-1}"
 FEATURE_CACHE="artifacts/cache/features.parquet"
 

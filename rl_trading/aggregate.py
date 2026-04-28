@@ -98,6 +98,10 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
                     print(f"  baseline failure fold{fold_idx} {sym}/{name}: {exc}")
 
     # 3. Stitch RL agent rewards from the run directory.
+    # Multi-seed: subdirs are named "<class>_fold<n>_seed<s>". For each
+    # (agent, fold, class) we pick the seed with the best val Sharpe
+    # (read from train_result.json) and use only that seed's parquets.
+    import json as _json
     found: dict[tuple[str, int, str], bool] = {}
     for agent_label in _AGENT_LABELS:
         agent_dir = run_dir / agent_label.lower()
@@ -106,11 +110,42 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
             continue
         for fold_idx, _ in enumerate(folds):
             for cls in _ASSET_CLASSES:
-                tuple_dir = agent_dir / f"{cls}_fold{fold_idx + 1}"
+                # Find every seed dir for this (agent, fold, class).
+                pattern = f"{cls}_fold{fold_idx + 1}_seed*"
+                seed_dirs = sorted(agent_dir.glob(pattern))
+                # Backward-compat: also accept the old non-seeded layout.
+                legacy = agent_dir / f"{cls}_fold{fold_idx + 1}"
+                if not seed_dirs and legacy.is_dir():
+                    seed_dirs = [legacy]
+                if not seed_dirs:
+                    continue
+                # Pick the best seed by val Sharpe.
+                best_dir = None
+                best_sharpe = -np.inf
+                for d in seed_dirs:
+                    rj = d / "train_result.json"
+                    if not rj.exists():
+                        continue
+                    try:
+                        with rj.open() as f:
+                            tr = _json.load(f)
+                    except Exception:
+                        continue
+                    sh = tr.get("best_val_sharpe", float("-inf"))
+                    if isinstance(sh, (int, float)) and np.isfinite(sh) and sh > best_sharpe:
+                        best_sharpe = sh
+                        best_dir = d
+                if best_dir is None:
+                    continue
+                tuple_dir = best_dir
                 zhang_p = tuple_dir / "rewards_zhang.parquet"
                 raw_p = tuple_dir / "rewards_raw.parquet"
                 if not zhang_p.exists():
                     continue
+                print(
+                    f"  {agent_label} fold{fold_idx + 1} {cls}: chose "
+                    f"{tuple_dir.name} (val Sharpe {best_sharpe:+.3f})"
+                )
                 found[(agent_label, fold_idx, cls)] = True
                 z = pd.read_parquet(zhang_p)
                 z["date"] = pd.to_datetime(z["date"])

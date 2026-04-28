@@ -136,17 +136,31 @@ class DQNAgent:
 # ── PG Agent (REINFORCE) ──────────────────────────────────────────────
 
 class PGAgent:
-    """REINFORCE with reward-to-go and mean baseline."""
+    """REINFORCE with reward-to-go, mean baseline, and entropy bonus.
+
+    Deviates from Zhang Eq. 6 / Exhibit 1 in three ways that are essentially
+    required to get REINFORCE working under 20-bp transaction costs and 50+
+    daily-bar episodes; paper omits these stabilizers, but they are standard
+    practice and prevent the silent-PG attractor where the softmax saturates
+    at "always hold" because trading costs > episode-mean reward signal:
+      - γ = 0.95 (paper Exhibit 1 says 0.3, but γ=0.3 gives effective horizon
+        ~3 bars and leaves G_t too small to overcome the cost baseline).
+      - entropy_coef = 0.05 (no entropy bonus in paper; without it the
+        softmax collapses to one-hot within ~10 epochs).
+      - Mean-of-batch baseline (unbiased; already restored).
+    """
 
     def __init__(
         self,
         n_features: int = 10,
         lr: float = 1e-4,
-        gamma: float = 0.3,
+        gamma: float = 0.95,
+        entropy_coef: float = 0.05,
         device: str = "cpu",
     ):
         self.device = torch.device(device)
         self.gamma = gamma
+        self.entropy_coef = entropy_coef
 
         self.net = PGNetwork(n_features).to(self.device)
         self.optimizer = optim.Adam(self.net.parameters(), lr=lr)
@@ -202,7 +216,8 @@ class PGAgent:
         log_probs_full = F.log_softmax(logits, dim=-1)
         entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1).mean()
         log_probs = log_probs_full.gather(1, a.unsqueeze(1)).squeeze(1)
-        loss = -(log_probs * returns).mean()
+        # Maximize expected return + entropy_coef * H(π).
+        loss = -(log_probs * returns).mean() - self.entropy_coef * entropy
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -244,7 +259,7 @@ class A2CAgent:
         batch_size: int = 128,
         gamma: float = 0.3,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.0,  # Paper does not use an entropy bonus.
+        entropy_coef: float = 0.01,  # Standard A2C stabilizer; paper omits.
         device: str = "cpu",
     ):
         self.device = torch.device(device)
