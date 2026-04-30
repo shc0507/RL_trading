@@ -153,9 +153,15 @@ class PGAgent:
     def __init__(
         self,
         n_features: int = 10,
-        lr: float = 1e-4,
+        # v7: lr 1e-4 -> 5e-4. PG gradients are tiny relative to A2C/DQN
+        # because per-bar return signal is small after /p_ref normalization
+        # and one update per episode means few opportunities to move.
+        lr: float = 5e-4,
         gamma: float = 0.95,
-        entropy_coef: float = 0.05,
+        # v7: entropy_coef 0.05 -> 0.01. The value gradient is O(0.05) per
+        # sample (|G_t| ~ 0.05 with γ=0.95); a 0.05 entropy coefficient
+        # was the same magnitude and kept the softmax pinned to uniform.
+        entropy_coef: float = 0.01,
         device: str = "cpu",
     ):
         self.device = torch.device(device)

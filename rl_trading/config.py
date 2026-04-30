@@ -26,13 +26,12 @@ DEFAULT_VOL_TARGET: float = 1.0
 # Exhibit 2 appears to target ≈1.0 so Std(R) ≈ 0.97 across methods).
 # Scale-invariant metrics (Sharpe, Sortino, Calmar) are unaffected.
 PORTFOLIO_VOL_TARGET: float = 1.0
-# Two cost rates: low cost during training (gives PG/DQN signal-to-noise
-# room to learn), paper-spec 20 bp at evaluation. Paper trains at 20 bp
-# uniformly but does not report training-stability data; we treat the
-# train cost as a hyperparameter.
-DEFAULT_COST_RATE_BP: float = 2.0  # basis points, used during training
-TEST_COST_RATE_BP: float = 20.0  # basis points, used at evaluation
 # Paper Exhibit 1: bp = 0.0020 (= 20 basis points; paper defines 1 bp = 0.0001).
+# v6 split this into train=2/test=20 to give PG room; that crashed A2C
+# (policy learned aggressive trading at 2 bp, got shredded by 10× cost
+# at test). Reverted to 20 bp throughout: paper-spec, no train/test gap.
+DEFAULT_COST_RATE_BP: float = 20.0  # basis points, used during training
+TEST_COST_RATE_BP: float = 20.0  # basis points, used at evaluation
 
 # ── Train / val / test splits ────────────────────────────────────────
 # Paper test horizon ends 2019-12-31; anything beyond is post-paper extension.

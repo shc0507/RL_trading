@@ -119,9 +119,15 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
                     seed_dirs = [legacy]
                 if not seed_dirs:
                     continue
-                # Pick the best seed by val Sharpe.
+                # Pick the best seed. For DQN/A2C: by val Sharpe (paper-
+                # standard). For PG: by val cumulative return — Sharpe of
+                # the silent-PG attractor (≈ 0/0) artificially beats any
+                # actively-trading policy with slight negative E(R) due
+                # to cost noise, so Sharpe-selection traps PG at do-nothing.
+                pg_metric = (agent_label.upper() == "PG")
+                metric_key = "best_val_cum_return" if pg_metric else "best_val_sharpe"
                 best_dir = None
-                best_sharpe = -np.inf
+                best_score = -np.inf
                 for d in seed_dirs:
                     rj = d / "train_result.json"
                     if not rj.exists():
@@ -131,9 +137,9 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
                             tr = _json.load(f)
                     except Exception:
                         continue
-                    sh = tr.get("best_val_sharpe", float("-inf"))
-                    if isinstance(sh, (int, float)) and np.isfinite(sh) and sh > best_sharpe:
-                        best_sharpe = sh
+                    sc = tr.get(metric_key, float("-inf"))
+                    if isinstance(sc, (int, float)) and np.isfinite(sc) and sc > best_score:
+                        best_score = sc
                         best_dir = d
                 if best_dir is None:
                     continue
@@ -144,7 +150,8 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
                     continue
                 print(
                     f"  {agent_label} fold{fold_idx + 1} {cls}: chose "
-                    f"{tuple_dir.name} (val Sharpe {best_sharpe:+.3f})"
+                    f"{tuple_dir.name} ({metric_key.replace('best_val_','val ')} "
+                    f"{best_score:+.3f})"
                 )
                 found[(agent_label, fold_idx, cls)] = True
                 z = pd.read_parquet(zhang_p)
