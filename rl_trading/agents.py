@@ -265,7 +265,10 @@ class A2CAgent:
         batch_size: int = 128,
         gamma: float = 0.3,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.01,  # Standard A2C stabilizer; paper omits.
+        # v8: revert to 0.0 (paper-literal). v5 (entropy=0) achieved +0.50
+        # All Sharpe; v6/v7 (entropy=0.01) regressed to -0.77. A2C's
+        # TanhNormal already gets exploration from the Gaussian σ.
+        entropy_coef: float = 0.0,
         device: str = "cpu",
     ):
         self.device = torch.device(device)

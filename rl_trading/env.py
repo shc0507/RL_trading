@@ -45,7 +45,11 @@ class EnvConfig:
     test_cost_rate_bp: float = TEST_COST_RATE_BP
     vol_target: float = DEFAULT_VOL_TARGET
     seq_len: int = OBSERVATION_WINDOW  # for LSTM sequence input
-    state_normalize: bool = True  # z-score features per window before feeding LSTM
+    # State z-score per window. v5 (no z-score) had A2C +0.50; v6/v7 (with
+    # z-score) had A2C -0.77. Off by default for v8; flip to True only as
+    # an experiment, since features are already in roughly comparable scales
+    # (norm_close, ret_h_vol, MACD all in std-units; only RSI is 0..100).
+    state_normalize: bool = False
 
 
 class TradingEnv:

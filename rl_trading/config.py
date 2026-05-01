@@ -17,11 +17,12 @@ RETURN_HORIZONS: tuple[int, ...] = (21, 42, 63, 252)
 ANNUALIZATION_FACTOR: int = 252
 
 # ── Trading defaults ─────────────────────────────────────────────────
-# Env-level vol target used inside the reward (Eq. 4). With per-contract
-# μ=1/p_ref normalization (env.py) the reward magnitude no longer
-# couples to price level, so σ_tgt=1.0 gives a richer training signal
-# without blowing up gradients.
-DEFAULT_VOL_TARGET: float = 1.0
+# Env-level vol target used inside the reward (Eq. 4). v6/v7 used 1.0
+# but A2C regressed badly on commodity/fixed-income; v5 used 0.15 and
+# A2C achieved +0.50 All Sharpe. Reverted to 0.15 for v8 to isolate the
+# σ_tgt effect; portfolio-level rescale stays at 1.0 for paper-magnitude
+# Std(R) in the reported tables.
+DEFAULT_VOL_TARGET: float = 0.15
 # Portfolio-level vol target applied at REPORTING time only (Zhang
 # Exhibit 2 appears to target ≈1.0 so Std(R) ≈ 0.97 across methods).
 # Scale-invariant metrics (Sharpe, Sortino, Calmar) are unaffected.
