@@ -1,0 +1,47 @@
+{
+  "agent": "pg",
+  "fold_idx": 1,
+  "asset_class": "commodity",
+  "train": [
+    "2005-01-01",
+    "2014-11-30"
+  ],
+  "val": [
+    "2014-12-01",
+    "2015-12-31"
+  ],
+  "test": [
+    "2016-01-01",
+    "2019-12-31"
+  ],
+  "class_symbols": [
+    "CC",
+    "DA",
+    "GI",
+    "JO",
+    "KC",
+    "KW",
+    "LB",
+    "NR",
+    "SB",
+    "ZA",
+    "ZC",
+    "ZF",
+    "ZG",
+    "ZI",
+    "ZK",
+    "ZL",
+    "ZN",
+    "ZO",
+    "ZP",
+    "ZR",
+    "ZT",
+    "ZW",
+    "ZZ"
+  ],
+  "status": "ok",
+  "best_epoch": 78,
+  "best_val_sharpe": -0.181505096957272,
+  "best_val_sortino": 5.089782488258525,
+  "best_val_cum_return": -0.0025506405387356952
+}

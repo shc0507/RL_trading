@@ -1,0 +1,33 @@
+{
+  "agent": "pg",
+  "fold_idx": 0,
+  "asset_class": "fx",
+  "train": [
+    "2005-01-01",
+    "2010-05-31"
+  ],
+  "val": [
+    "2010-06-01",
+    "2010-12-31"
+  ],
+  "test": [
+    "2011-01-01",
+    "2015-12-31"
+  ],
+  "class_symbols": [
+    "AN",
+    "BN",
+    "CN",
+    "DX",
+    "FN",
+    "JN",
+    "MP",
+    "NK",
+    "SN"
+  ],
+  "status": "ok",
+  "best_epoch": 100,
+  "best_val_sharpe": -0.9340298300250297,
+  "best_val_sortino": 7.595957799178838,
+  "best_val_cum_return": -0.0074453488838911374
+}

@@ -1,0 +1,35 @@
+{
+  "agent": "dqn",
+  "fold_idx": 1,
+  "asset_class": "equity_index",
+  "seed": 0,
+  "train": [
+    "2005-01-01",
+    "2014-11-30"
+  ],
+  "val": [
+    "2014-12-01",
+    "2015-12-31"
+  ],
+  "test": [
+    "2016-01-01",
+    "2019-12-31"
+  ],
+  "class_symbols": [
+    "CA",
+    "ER",
+    "ES",
+    "LX",
+    "MD",
+    "SC",
+    "SP",
+    "XU",
+    "XX",
+    "YM"
+  ],
+  "status": "ok",
+  "best_epoch": 20,
+  "best_val_sharpe": 0.10587611990376826,
+  "best_val_sortino": 0.18392954778113912,
+  "best_val_cum_return": 0.014540819968245373
+}

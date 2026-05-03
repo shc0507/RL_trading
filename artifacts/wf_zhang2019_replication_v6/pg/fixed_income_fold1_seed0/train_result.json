@@ -1,0 +1,29 @@
+{
+  "agent": "pg",
+  "fold_idx": 0,
+  "asset_class": "fixed_income",
+  "seed": 0,
+  "train": [
+    "2005-01-01",
+    "2010-05-31"
+  ],
+  "val": [
+    "2010-06-01",
+    "2010-12-31"
+  ],
+  "test": [
+    "2011-01-01",
+    "2015-12-31"
+  ],
+  "class_symbols": [
+    "DT",
+    "FB",
+    "TY",
+    "UB"
+  ],
+  "status": "ok",
+  "best_epoch": 16,
+  "best_val_sharpe": -6.7219522814260575,
+  "best_val_sortino": -9.793564662765696,
+  "best_val_cum_return": -2.6497420109358423
+}

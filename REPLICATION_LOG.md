@@ -486,6 +486,43 @@ exploration scheduling or other unstated tricks.
 
 ---
 
+## Artifacts committed for inspection
+
+Each completed version (v4–v8) has a small set of summary artifacts
+checked into the repo under `artifacts/wf_zhang2019_replication_<v>/`:
+
+| File | What it is | Size per version |
+|---|---|---|
+| `aggregated/results.csv` | Exhibit-2-style portfolio metrics (vol-scaled) | ~2.5 KB |
+| `aggregated/results_unscaled.csv` | Exhibit-B1-style portfolio metrics (raw) | ~2.5 KB |
+| `aggregated/cumulative_returns.png` | Per-class cumulative-return plot (Exhibit 3 layout, vol-scaled) | ~140 KB |
+| `aggregated/cumulative_return_raw.png` | Per-class compounded-wealth plot (raw) | ~240 KB |
+| `<agent>/<class>_fold<n>[_seed<s>]/train_result.json` | Per-tuple training summary (best epoch, val Sharpe/Sortino/Cum, fold dates, hyperparams) | ~500 B per tuple |
+
+Larger files NOT pushed to the repo (regenerable by re-running the
+pipeline; ignored via `artifacts/` in `.gitignore`):
+
+- `aggregated/per_symbol_*.csv` (~23 MB each) — daily reward stream per
+  contract per method; useful for per-asset analysis but reconstructible
+  from `per_tuple_results/<agent>/<class>_fold<n>/rewards_zhang.parquet`.
+- `aggregated/portfolio_*.csv` (~3 MB each) — daily portfolio-level
+  return streams.
+- `<agent>/<class>_fold<n>[_seed<s>]/rewards_*.parquet` — per-tuple test-window
+  reward streams (raw inputs to the aggregation step).
+- `<agent>/<class>_fold<n>[_seed<s>]/checkpoint/*.pt` — trained model
+  weights.
+
+To regenerate the larger files for any version, check out that
+version's commit and run:
+
+```bash
+RUN_ID=zhang2019_replication_<v> bash scripts/run_walkforward_parallel.sh
+```
+
+(This will rebuild from scratch, including retraining all RL agents.)
+
+---
+
 ## How to reproduce
 
 The pipeline is fully scripted. To re-run any version:

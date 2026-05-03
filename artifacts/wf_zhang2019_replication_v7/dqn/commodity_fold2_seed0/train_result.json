@@ -1,0 +1,48 @@
+{
+  "agent": "dqn",
+  "fold_idx": 1,
+  "asset_class": "commodity",
+  "seed": 0,
+  "train": [
+    "2005-01-01",
+    "2014-11-30"
+  ],
+  "val": [
+    "2014-12-01",
+    "2015-12-31"
+  ],
+  "test": [
+    "2016-01-01",
+    "2019-12-31"
+  ],
+  "class_symbols": [
+    "CC",
+    "DA",
+    "GI",
+    "JO",
+    "KC",
+    "KW",
+    "LB",
+    "NR",
+    "SB",
+    "ZA",
+    "ZC",
+    "ZF",
+    "ZG",
+    "ZI",
+    "ZK",
+    "ZL",
+    "ZN",
+    "ZO",
+    "ZP",
+    "ZR",
+    "ZT",
+    "ZW",
+    "ZZ"
+  ],
+  "status": "ok",
+  "best_epoch": 5,
+  "best_val_sharpe": -0.22357622188471737,
+  "best_val_sortino": -0.1949537353933819,
+  "best_val_cum_return": -0.10712426713416395
+}

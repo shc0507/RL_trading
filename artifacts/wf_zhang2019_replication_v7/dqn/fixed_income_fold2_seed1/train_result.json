@@ -1,0 +1,29 @@
+{
+  "agent": "dqn",
+  "fold_idx": 1,
+  "asset_class": "fixed_income",
+  "seed": 1,
+  "train": [
+    "2005-01-01",
+    "2014-11-30"
+  ],
+  "val": [
+    "2014-12-01",
+    "2015-12-31"
+  ],
+  "test": [
+    "2016-01-01",
+    "2019-12-31"
+  ],
+  "class_symbols": [
+    "DT",
+    "FB",
+    "TY",
+    "UB"
+  ],
+  "status": "ok",
+  "best_epoch": 1,
+  "best_val_sharpe": -0.21788106312402566,
+  "best_val_sortino": -0.024162674021998974,
+  "best_val_cum_return": -0.04093012826527178
+}

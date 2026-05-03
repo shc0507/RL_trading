@@ -1,0 +1,34 @@
+{
+  "agent": "dqn",
+  "fold_idx": 1,
+  "asset_class": "fx",
+  "seed": 0,
+  "train": [
+    "2005-01-01",
+    "2014-11-30"
+  ],
+  "val": [
+    "2014-12-01",
+    "2015-12-31"
+  ],
+  "test": [
+    "2016-01-01",
+    "2019-12-31"
+  ],
+  "class_symbols": [
+    "AN",
+    "BN",
+    "CN",
+    "DX",
+    "FN",
+    "JN",
+    "MP",
+    "NK",
+    "SN"
+  ],
+  "status": "ok",
+  "best_epoch": 8,
+  "best_val_sharpe": 0.1934945473413691,
+  "best_val_sortino": 1.3870784419473075,
+  "best_val_cum_return": 0.014068101574361218
+}

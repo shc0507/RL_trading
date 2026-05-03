@@ -1,0 +1,29 @@
+{
+  "agent": "a2c",
+  "fold_idx": 0,
+  "asset_class": "fixed_income",
+  "seed": 2,
+  "train": [
+    "2005-01-01",
+    "2010-05-31"
+  ],
+  "val": [
+    "2010-06-01",
+    "2010-12-31"
+  ],
+  "test": [
+    "2011-01-01",
+    "2015-12-31"
+  ],
+  "class_symbols": [
+    "DT",
+    "FB",
+    "TY",
+    "UB"
+  ],
+  "status": "ok",
+  "best_epoch": 20,
+  "best_val_sharpe": -1.5956733579598639,
+  "best_val_sortino": -2.3879066109370135,
+  "best_val_cum_return": -0.0007180117533758022
+}

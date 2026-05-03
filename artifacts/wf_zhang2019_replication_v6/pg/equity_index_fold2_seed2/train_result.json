@@ -1,0 +1,35 @@
+{
+  "agent": "pg",
+  "fold_idx": 1,
+  "asset_class": "equity_index",
+  "seed": 2,
+  "train": [
+    "2005-01-01",
+    "2014-11-30"
+  ],
+  "val": [
+    "2014-12-01",
+    "2015-12-31"
+  ],
+  "test": [
+    "2016-01-01",
+    "2019-12-31"
+  ],
+  "class_symbols": [
+    "CA",
+    "ER",
+    "ES",
+    "LX",
+    "MD",
+    "SC",
+    "SP",
+    "XU",
+    "XX",
+    "YM"
+  ],
+  "status": "ok",
+  "best_epoch": 7,
+  "best_val_sharpe": -2.5799953694563973,
+  "best_val_sortino": -3.451948550173941,
+  "best_val_cum_return": -1.9459109063484514
+}
