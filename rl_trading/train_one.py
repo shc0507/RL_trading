@@ -36,13 +36,11 @@ from rl_trading.wandb_logger import WandbLogger
 def _agent_label(agent_name: str) -> str:
     return agent_name.upper()
 
-
 def _resolve_fold(fold_idx: int) -> dict[str, tuple[str, str]]:
     folds = walk_forward_splits()
     if fold_idx < 0 or fold_idx >= len(folds):
         raise ValueError(f"fold_idx {fold_idx} out of range 0..{len(folds) - 1}")
     return folds[fold_idx]
-
 
 def _eligible_universe(feat: pd.DataFrame, seq_len: int) -> list[dict[str, str]]:
     """Apply the same full-history filter used by the monolithic pipeline."""
@@ -51,7 +49,6 @@ def _eligible_universe(feat: pd.DataFrame, seq_len: int) -> list[dict[str, str]]
         ACTIVE_UNIVERSE, feat, folds, min_rows=seq_len + 1,
     )
     return eligible
-
 
 def run_one(
     agent_name: str,
@@ -73,7 +70,7 @@ def run_one(
     wandb_group: str | None = None,
 ) -> dict:
     """Train one (agent, fold, class, seed) and dump results to output_dir."""
-    # Set every random source before any model init or env step.
+    # Seed every RNG before any model init or env step.
     import random as _random
     import torch as _torch
     _random.seed(seed)
@@ -88,11 +85,9 @@ def run_one(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Features
     requested = [u["symbol"] for u in ACTIVE_UNIVERSE]
     feat = load_or_build_feature_cache(requested, feature_cache)
 
-    # Build agent + env config up-front so we know seq_len for the filter
     factories = _make_agent_factories(device)
     if agent_name not in factories:
         raise ValueError(f"Unknown agent: {agent_name}")
@@ -109,7 +104,6 @@ def run_one(
     fold = _resolve_fold(fold_idx)
     fold_label = f"{asset_class}_fold{fold_idx + 1}"
 
-    # wandb (optional)
     wandb_config = {
         "mode": "train_one",
         "agent": agent_name,
@@ -175,7 +169,6 @@ def run_one(
             raise FileNotFoundError(f"Missing checkpoint: {ckpt}")
         agent.load(ckpt)
 
-        # Collect test-window rewards per symbol.
         rows_zhang: list[pd.DataFrame] = []
         rows_raw: list[pd.DataFrame] = []
         per_symbol_failures: dict[str, str] = {}
@@ -225,12 +218,9 @@ def run_one(
 
     return train_result
 
-
-# ── CLI ─────────────────────────────────────────────────────────────
-
 _ASSET_CLASSES = ["commodity", "equity_index", "fixed_income", "fx"]
 _AGENTS = ["dqn", "pg", "a2c"]
-_N_SEEDS = 3  # multi-seed per (agent, fold, class); aggregator picks best by val Sharpe
+_N_SEEDS = 3
 
 
 def _tuple_from_array_index(idx: int) -> tuple[str, int, str, int]:
@@ -251,12 +241,10 @@ def _tuple_from_array_index(idx: int) -> tuple[str, int, str, int]:
     fold_i, class_i = divmod(rem, n_classes)
     return _AGENTS[agent_i], fold_i, _ASSET_CLASSES[class_i], seed_i
 
-
 def _canonical_output_dir(
     run_dir: Path, agent: str, fold_idx: int, asset_class: str, seed: int,
 ) -> Path:
     return Path(run_dir) / agent / f"{asset_class}_fold{fold_idx + 1}_seed{seed}"
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -304,9 +292,8 @@ def main():
     if args.seed is not None:
         seed = args.seed
 
-    # Per-agent default patience and early-stop policy.
-    # DQN/PG are slow learners under our settings → OR patience.
-    # A2C is the fastest learner → paper-literal Sharpe-only.
+    # Per-agent default patience and early-stop policy. DQN/PG benefit
+    # from OR-multi (longer training); A2C uses paper-literal Sharpe-only.
     _DEFAULTS = {
         "dqn": {"patience": 50, "policy": "or_multi"},
         "pg":  {"patience": 50, "policy": "or_multi"},
@@ -345,7 +332,6 @@ def main():
         wandb_tags=args.wandb_tags,
         wandb_group=wandb_group,
     )
-
 
 if __name__ == "__main__":
     main()

@@ -20,11 +20,10 @@ class TrainerConfig:
     patience: int = 20
     eval_every: int = 1
     checkpoint_dir: str = "checkpoints"
-    train_dates: tuple[str, str] | None = None  # override default split dates
+    train_dates: tuple[str, str] | None = None
     val_dates: tuple[str, str] | None = None
-    # "sharpe_only" (paper-literal, single metric; good for A2C),
-    # or "or_multi" (Sharpe|Sortino|Cum all stale; longer training; helps
-    # slow learners DQN/PG).
+    # "sharpe_only" (paper-literal) or "or_multi" (Sharpe AND Sortino
+    # AND Cum all stale; gives slow learners more training time).
     early_stop_policy: str = "sharpe_only"
 
 
@@ -57,19 +56,10 @@ class Trainer:
             self.logger.define_context(self.context)
 
     def train(self) -> dict:
-        """Run full training loop with configurable early stopping.
+        """Train with configurable early stopping (see TrainerConfig).
 
-        ``cfg.early_stop_policy``:
-          - "sharpe_only": stop when val Sharpe has been stale for
-            ``cfg.patience`` epochs. Paper-literal (Zhang p.7).
-          - "or_multi": stop when val Sharpe AND Sortino AND cum-return
-            have ALL been stale for ``cfg.patience`` epochs. Slower
-            learners (DQN, PG) need this in our setup; we observed
-            best_epoch=1 collapses under sharpe_only.
-
-        Checkpoint is always saved on Sharpe improvement (the paper's
-        primary model-selection criterion). Sortino and Cum gate stopping
-        but do not select the checkpoint.
+        Checkpoint is always saved on Sharpe improvement; Sortino and Cum
+        only gate stopping under the ``or_multi`` policy.
         """
         policy = self.cfg.early_stop_policy
         if policy not in ("sharpe_only", "or_multi"):
@@ -84,7 +74,6 @@ class Trainer:
         best_epoch = 0
 
         for epoch in range(1, self.cfg.n_epochs + 1):
-            # Train one episode per symbol (shuffled to avoid order effects)
             train_syms = list(self.symbols)
             _random.shuffle(train_syms)
             train_rewards = []
@@ -112,7 +101,6 @@ class Trainer:
                 cur_sortino = float(np.mean(val_sortinos))
                 cur_cum = float(np.mean(val_cum_returns))
 
-                # Always checkpoint on Sharpe improvement (paper-aligned).
                 if cur_sharpe > best_sharpe:
                     best_sharpe = cur_sharpe
                     best_epoch = epoch
@@ -192,8 +180,6 @@ class Trainer:
         }
 
     def _run_episode(self, symbol: str, split: str, train: bool = True) -> dict:
-        """Run one full episode on the given split."""
-        # Use custom dates if configured, otherwise fall back to named split
         if split == "train" and self.cfg.train_dates:
             state = self.env.reset(symbol, start=self.cfg.train_dates[0],
                                    end=self.cfg.train_dates[1])
@@ -237,13 +223,11 @@ class Trainer:
             if next_state is not None:
                 state = next_state
 
-        # End-of-episode updates for PG
         if train and isinstance(self.agent, PGAgent):
             loss = self.agent.train_episode()
             losses.append(loss)
             stats_snapshots.append(dict(self.agent.last_stats))
 
-        # Drop leftover A2C buffer at episode end
         if train and isinstance(self.agent, A2CAgent) and len(self.agent.states) > 0:
             self.agent.states.clear()
             self.agent.actions.clear()

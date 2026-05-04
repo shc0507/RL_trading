@@ -59,12 +59,10 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
     output_dir = Path(output_dir)
     feature_cache = Path(feature_cache)
 
-    # 1. Features + eligible universe (matches train_one's filter logic).
     requested_syms = [u["symbol"] for u in ACTIVE_UNIVERSE]
     feat = load_or_build_feature_cache(requested_syms, feature_cache)
     folds = walk_forward_splits()
-    # We don't know agent seq_len here but all three agents use seq_len=60
-    # per _make_agent_factories. Use the largest defensible value.
+    # All three agents use seq_len=60 in _make_agent_factories.
     min_rows = EnvConfig().seq_len + 1
     universe, exclusions = _filter_full_history_universe(
         ACTIVE_UNIVERSE, feat, folds, min_rows=min_rows,
@@ -80,7 +78,6 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
     results: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
     raw_daily: dict[str, dict[str, pd.Series]] = {sym: {} for sym in all_symbols}
 
-    # 2. Baselines per fold.
     print(f"\nComputing baselines across {len(folds)} folds ...")
     for fold_idx, fold in enumerate(folds, 1):
         test_start, test_end = fold["test"]
@@ -97,10 +94,9 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
                 except Exception as exc:
                     print(f"  baseline failure fold{fold_idx} {sym}/{name}: {exc}")
 
-    # 3. Stitch RL agent rewards from the run directory.
-    # Multi-seed: subdirs are named "<class>_fold<n>_seed<s>". For each
-    # (agent, fold, class) we pick the seed with the best val Sharpe
-    # (read from train_result.json) and use only that seed's parquets.
+    # Multi-seed: subdirs are "<class>_fold<n>_seed<s>". For each
+    # (agent, fold, class) we pick the seed with the best val metric
+    # and use only that seed's parquets.
     import json as _json
     found: dict[tuple[str, int, str], bool] = {}
     for agent_label in _AGENT_LABELS:
@@ -110,20 +106,16 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
             continue
         for fold_idx, _ in enumerate(folds):
             for cls in _ASSET_CLASSES:
-                # Find every seed dir for this (agent, fold, class).
                 pattern = f"{cls}_fold{fold_idx + 1}_seed*"
                 seed_dirs = sorted(agent_dir.glob(pattern))
-                # Backward-compat: also accept the old non-seeded layout.
+                # Fallback to the pre-multi-seed directory layout.
                 legacy = agent_dir / f"{cls}_fold{fold_idx + 1}"
                 if not seed_dirs and legacy.is_dir():
                     seed_dirs = [legacy]
                 if not seed_dirs:
                     continue
-                # Pick the best seed. For DQN/A2C: by val Sharpe (paper-
-                # standard). For PG: by val cumulative return — Sharpe of
-                # the silent-PG attractor (≈ 0/0) artificially beats any
-                # actively-trading policy with slight negative E(R) due
-                # to cost noise, so Sharpe-selection traps PG at do-nothing.
+                # PG uses cum-return selection; Sharpe ≈ 0/0 of a
+                # do-nothing policy artificially beats any active one.
                 pg_metric = (agent_label.upper() == "PG")
                 metric_key = "best_val_cum_return" if pg_metric else "best_val_sharpe"
                 best_dir = None
@@ -176,7 +168,6 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
                         )
                         _append_series(raw_daily, sym, agent_label, s)
 
-    # Report completeness
     total_tuples = len(_AGENT_LABELS) * len(folds) * len(_ASSET_CLASSES)
     print(
         f"\nLoaded {len(found)}/{total_tuples} agent tuples from {run_dir}"
@@ -195,7 +186,6 @@ def aggregate(run_dir: Path, output_dir: Path, feature_cache: Path) -> None:
         if len(missing) > 20:
             print(f"  ... and {len(missing) - 20} more")
 
-    # 4. Aggregation + reporting (shared helper).
     method_names = list(_BASELINE_FNS.keys()) + [
         label for label in _AGENT_LABELS
         if any(label in results[s] for s in all_symbols)

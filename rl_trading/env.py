@@ -22,33 +22,26 @@ from rl_trading.config import (
 )
 from rl_trading.features import FEATURE_COLS
 
-# ── Split date ranges ───────────────────────────────────────────────
 _SPLITS: dict[str, tuple[str, str]] = {
     "train": (TRAIN_START, TRAIN_END),
     "val": (VAL_START, VAL_END),
     "test": (TEST_START, TEST_END),
 }
 
-# Discrete action → position mapping
 _ACTION_TO_POS = {0: -1.0, 1: 0.0, 2: 1.0}
 
-# State dimension: market features only (Zhang 2019 p.4 — 10 features; the
-# previous position is NOT part of the observation, only consumed internally
-# by the reward via A_{t-1} in Eq. 4).
+# 10 market features (Zhang 2019 p.4); position is consumed only via
+# the reward (Eq. 4), not exposed to the agent.
 STATE_DIM = len(FEATURE_COLS)
 
 
 @dataclass
 class EnvConfig:
-    action_mode: str = "discrete"  # "discrete" or "continuous"
+    action_mode: str = "discrete"
     cost_rate_bp: float = DEFAULT_COST_RATE_BP
     test_cost_rate_bp: float = TEST_COST_RATE_BP
     vol_target: float = DEFAULT_VOL_TARGET
-    seq_len: int = OBSERVATION_WINDOW  # for LSTM sequence input
-    # State z-score per window. v5 (no z-score) had A2C +0.50; v6/v7 (with
-    # z-score) had A2C -0.77. Off by default for v8; flip to True only as
-    # an experiment, since features are already in roughly comparable scales
-    # (norm_close, ret_h_vol, MACD all in std-units; only RSI is 0..100).
+    seq_len: int = OBSERVATION_WINDOW
     state_normalize: bool = False
 
 
@@ -56,19 +49,10 @@ class TradingEnv:
     """Single-asset trading environment with Zhang et al. reward."""
 
     def __init__(self, feature_frame: pd.DataFrame, cfg: EnvConfig | None = None):
-        """
-        Parameters
-        ----------
-        feature_frame : DataFrame output of FeatureBuilder.transform(), must contain
-            columns: date, symbol, close, ewm_vol, window_ready, and FEATURE_COLS.
-        cfg : environment configuration.
-        """
         self.full_frame = feature_frame
         self.cfg = cfg or EnvConfig()
-        # _bp is (re)set per episode in reset(): training cost vs test cost.
         self._bp = self.cfg.cost_rate_bp / 10_000
 
-        # Episode state (set in reset)
         self._data: pd.DataFrame | None = None
         self._features: np.ndarray | None = None
         self._prices: np.ndarray | None = None
@@ -78,25 +62,17 @@ class TradingEnv:
         self._position: float = 0.0
         self._prev_vol_scale: float = 0.0
 
-        # Episode history
         self.history: dict[str, list] = {}
-
-    # ── Public API ──────────────────────────────────────────────────
 
     def reset(
         self, symbol: str, split: str = "train",
         *, start: str | None = None, end: str | None = None,
     ) -> np.ndarray:
-        """Start a new episode for *symbol* in the given split.
+        """Start a new episode.
 
-        Returns the first state vector (1D, length len(FEATURE_COLS)) or,
-        if cfg.seq_len > 1, a 2D array of shape (seq_len, n_features).
-
-        If *start* and *end* are provided they override *split*.
-
-        Sets self._bp from cfg.cost_rate_bp for train/val and from
-        cfg.test_cost_rate_bp for test (or whenever start/end are given —
-        the canonical use of date overrides is the post-train test/eval).
+        Returns shape (seq_len, n_features) when ``cfg.seq_len > 1``,
+        else (n_features,). ``self._bp`` is set from ``cost_rate_bp`` for
+        train/val and ``test_cost_rate_bp`` otherwise.
         """
         if start is not None and end is not None:
             date_start, date_end = start, end
@@ -123,20 +99,14 @@ class TradingEnv:
         self._ewm_vol = self._data["ewm_vol"].to_numpy(dtype=np.float64)
         self._dates = self._data["date"].to_numpy()
 
-        # Start at the earliest index that allows a full sequence
         self._t = max(self.cfg.seq_len - 1, 0)
         self._position = 0.0
         self._prev_vol_scale = 0.0
 
-        # Per-contract reward normalization (Zhang p.5 μ knob). Paper sets
-        # μ=1 uniformly, but then absolute dollar rewards scale with the
-        # contract's price level — under RAD this differs by ~100× across
-        # commodity contracts (DA $20 vs LB $3600). The equal-weight
-        # portfolio becomes dollar-weighted, which flips baseline signs
-        # (e.g. FX Long) and dominates gradients on high-priced contracts.
-        # Use μ_i = 1/p_ref with p_ref = first episode price; this makes
-        # rewards roughly dimensionless (≈ pct-return scale) and brings
-        # the portfolio mean into true equal-weight.
+        # Per-contract reward normalization (Zhang p.5 μ knob): with μ=1
+        # the equal-weight portfolio becomes dollar-weighted under RAD
+        # because contracts have wildly different price levels. Using
+        # μ_i = 1/p_ref restores true equal-weight.
         self._ref_price = float(self._prices[0]) if self._prices[0] > 0 else 1.0
 
         self.history = {
@@ -151,53 +121,28 @@ class TradingEnv:
         return self._get_state()
 
     def step(self, action) -> tuple[np.ndarray | None, float, bool, dict]:
-        """Execute one step.
-
-        Parameters
-        ----------
-        action : int (0/1/2) for discrete mode, float in [-1,1] for continuous.
-
-        Returns
-        -------
-        (next_state, reward, done, info)
-        """
         position = self._decode_action(action)
 
-        # Current time index
         t = self._t
-        # Additive return: r_t = p_{t+1} - p_t  (Zhang et al. Eq. 4)
-        # We need the *next* price to compute the return earned by holding
-        # a position at time t, so the last actionable step is len-2.
         if t >= len(self._prices) - 1:
             return None, 0.0, True, {}
 
         price_t = self._prices[t]
         r_t = self._prices[t + 1] - price_t
 
-        # Paper Eq. 4: A_{t-1} uses σ_{t-1}, the ex-ante vol known at the
-        # moment the position is chosen. In this env, the action picked at
-        # code-index t earns prices[t+1]-prices[t], so the matching "decision
-        # time" is code-index t itself. ewm_vol[t] uses pct_change through t,
-        # i.e., information available once close[t] has been observed.
+        # Decision-time σ: ewm_vol[t] uses pct_change through close[t].
         ann_vol_t = self._ewm_vol[t] * math.sqrt(252)
-        # Guard against NaN or non-positive vol → don't trade this bar.
-        # Soft σ floor of 1% annualized: paper is uncapped, but traded
-        # futures rarely have realized vol < 1% (bid-ask + roll noise).
-        # Prevents pathological vol_scale on ultra-quiet bars without
-        # materially changing sizing for normal contracts.
         if np.isnan(ann_vol_t) or ann_vol_t <= 0.0:
             vol_scale = 0.0
         else:
+            # 1% annualized σ floor prevents pathological scaling on
+            # ultra-quiet bars; rarely binding for traded futures.
             vol_scale = self.cfg.vol_target / max(ann_vol_t, 0.01)
 
-        # Reward per Zhang et al. Eq. 4 (additive profits, σ_{t-1}),
-        # then divided by ref_price so per-contract rewards are on a
-        # common dimensionless scale (see reset() for the rationale).
         position_return = vol_scale * position * r_t
         tc = self._bp * price_t * abs(vol_scale * position - self._prev_vol_scale * self._position)
         reward = (position_return - tc) / self._ref_price
 
-        # Record history
         info = {
             "date": self._dates[t],
             "price": self._prices[t],
@@ -213,24 +158,12 @@ class TradingEnv:
         self._prev_vol_scale = vol_scale
         self._t += 1
 
-        # Check done
         if self._t >= len(self._prices) - 1:
             return None, reward, True, info
 
         return self._get_state(), reward, False, info
 
-    # ── Internals ───────────────────────────────────────────────────
-
     def _get_state(self) -> np.ndarray:
-        """Return the current observation: the 10 market features (Zhang 2019).
-
-        If ``cfg.state_normalize`` is True, z-score each feature column
-        within the observation window (mean and std over seq_len bars,
-        per feature). This is a standard LSTM stabilizer that the paper
-        does not specify but every working DRL trader uses; it makes the
-        agent robust to per-contract scale drift in features that aren't
-        already z-scored at construction (e.g. norm_close, ret_h_vol).
-        """
         if self.cfg.seq_len <= 1:
             x = self._features[self._t].copy()
         else:
@@ -245,5 +178,4 @@ class TradingEnv:
     def _decode_action(self, action) -> float:
         if self.cfg.action_mode == "discrete":
             return _ACTION_TO_POS[int(action)]
-        # Continuous: clamp to [-1, 1]
         return float(np.clip(action, -1.0, 1.0))

@@ -43,9 +43,6 @@ from rl_trading.trainer import Trainer, TrainerConfig
 from rl_trading.wandb_logger import WandbLogger
 
 
-# ── Helpers ─────────────────────────────────────────────────────────
-
-
 def _detect_device() -> str:
     """Auto-detect best available device."""
     if torch.cuda.is_available():
@@ -53,7 +50,6 @@ def _detect_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
-
 
 def _make_agent_factories(device: str) -> dict:
     return {
@@ -99,7 +95,6 @@ def _extract_hparams(agent, env_cfg) -> dict:
     }
     return h
 
-
 def _collect_rl_test(
     agent: DQNAgent | PGAgent | A2CAgent,
     feature_frame: pd.DataFrame,
@@ -134,7 +129,6 @@ def _collect_rl_test(
         index=pd.to_datetime(env.history["date"]),
     )
 
-
 def _baseline_frac_daily(
     feature_frame: pd.DataFrame, symbol: str, fn, start: str, end: str,
 ) -> pd.Series:
@@ -154,7 +148,6 @@ def _baseline_frac_daily(
     n = len(prices)
     simple_r = prices[1:] / prices[:-1] - 1.0
     return pd.Series(positions[: n - 1] * simple_r, index=dates[: n - 1])
-
 
 def _portfolio_vol_scale(
     port_returns: np.ndarray,
@@ -176,7 +169,6 @@ def _portfolio_vol_scale(
     if not np.isfinite(realized) or realized <= 0.0:
         return arr
     return arr * (vol_target / realized)
-
 
 def _dump_series_csv(
     nested: dict[str, dict[str, pd.Series]],
@@ -204,7 +196,6 @@ def _dump_series_csv(
     out.to_csv(path, index=False)
     print(f"Saved {path}")
 
-
 def _append_rewards(
     results: dict[str, dict[str, pd.Series]],
     sym: str, method: str, rewards: pd.Series,
@@ -214,7 +205,6 @@ def _append_rewards(
         results[sym][method] = pd.concat([results[sym][method], rewards])
     else:
         results[sym][method] = rewards
-
 
 def _count_window_ready_rows(
     feature_frame: pd.DataFrame,
@@ -229,7 +219,6 @@ def _count_window_ready_rows(
         & (feature_frame["date"] <= end)
     )
     return int(mask.sum())
-
 
 def _filter_full_history_universe(
     universe: list[dict[str, str]],
@@ -269,7 +258,6 @@ def _filter_full_history_universe(
 
     return eligible, exclusions
 
-
 def _print_universe_summary(
     requested_symbols: list[str],
     eligible_universe: list[dict[str, str]],
@@ -289,7 +277,6 @@ def _print_universe_summary(
             f"{item['split']} has {item['rows']} rows in "
             f"{item['start']}–{item['end']}; need >= {item['min_rows']}"
         )
-
 
 def aggregate_and_report(
     results: dict[str, dict[str, pd.Series]],
@@ -412,7 +399,6 @@ def aggregate_and_report(
 
     return metrics_df
 
-
 def build_feature_frame(symbols: list[str]) -> pd.DataFrame:
     """Fetch bars and build the feature frame used by training and evaluation.
 
@@ -422,7 +408,6 @@ def build_feature_frame(symbols: list[str]) -> pd.DataFrame:
     fetch_start = str(int(TRAIN_START[:4]) - 2) + TRAIN_START[4:]
     bars = load_bars(symbols, start=fetch_start, end=TEST_END)
     return FeatureBuilder().transform(bars)
-
 
 def load_or_build_feature_cache(
     symbols: list[str],
@@ -437,7 +422,6 @@ def load_or_build_feature_cache(
     feat.to_parquet(cache_path, index=False)
     return feat
 
-
 def _print_failures(
     failures: list[tuple[str, str, str]],
     *,
@@ -450,9 +434,6 @@ def _print_failures(
         print(f"\n  [{scope} / {method}]")
         print(tb)
     print(f"{'!'*60}\n")
-
-
-# ── Main experiment ─────────────────────────────────────────────────
 
 def run_experiment(
     symbols: list[str] | None = None,
@@ -493,7 +474,6 @@ def run_experiment(
 
     agent_factories = _make_agent_factories(device)
 
-    # Resolve symbols and asset classes
     universe = ACTIVE_UNIVERSE
     if symbols is not None:
         known_syms = {u["symbol"] for u in ACTIVE_UNIVERSE}
@@ -508,7 +488,6 @@ def run_experiment(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Fetch data and build features (or reuse prebuilt cache)
     if feature_cache_path is not None:
         print(f"Loading feature cache: {feature_cache_path}")
         feat = load_or_build_feature_cache(requested_symbols, feature_cache_path)
@@ -517,7 +496,6 @@ def run_experiment(
         print("Fetching data and building features ...")
         feat = build_feature_frame(requested_symbols)
 
-    # 2. Determine folds
     if walk_forward:
         folds = walk_forward_splits()
     else:
@@ -527,8 +505,8 @@ def run_experiment(
             "test": (TEST_START, TEST_END),
         }]
 
-    # Resolve agent metadata up front so eligibility filtering can respect
-    # the longest state sequence required by any configured agent.
+    # Resolve agent metadata up front so the eligibility filter can use
+    # the longest state sequence among requested agents.
     agent_hparams: dict[str, dict] = {}
     min_history_rows = 2
     for agent_name in agents:
@@ -556,7 +534,6 @@ def run_experiment(
 
     sym_to_class = {u["symbol"]: u["asset_class"] for u in universe}
 
-    # Group symbols by asset class after filtering so every fold sees one stable universe.
     class_symbols: dict[str, list[str]] = defaultdict(list)
     for sym in all_symbols:
         class_symbols[sym_to_class[sym]].append(sym)
@@ -565,7 +542,6 @@ def run_experiment(
         print("Preflight only: stopping after stable-universe inspection.")
         return None
 
-    # Initialize wandb (no-op if disabled)
     wandb_config = {
         "agents": agents,
         "n_epochs": n_epochs,
@@ -600,7 +576,7 @@ def run_experiment(
     fig_raw = None
 
     try:
-        # 3. Run each fold
+
         for fold_idx, fold in enumerate(folds, 1):
             train_dates = fold["train"]
             val_dates = fold["val"]
@@ -613,7 +589,6 @@ def run_experiment(
                       f"test {test_dates[0]}–{test_dates[1]}")
                 print(f"{'#'*60}")
 
-            # ── Baselines (per-symbol, non-learned) ──
             print(f"\n  Baselines ...")
             for sym in all_symbols:
                 for name, fn in _BASELINE_FNS.items():
@@ -634,7 +609,6 @@ def run_experiment(
                                if "Long" in results[s] and len(results[s]["Long"]) > 0)
             print(f"  Baselines: {baseline_syms}/{len(all_symbols)} symbols OK")
 
-            # ── RL agents (one model per asset class) ──
             for agent_name in agents:
                 label = agent_name.upper()
                 for cls, class_syms in class_symbols.items():
@@ -695,7 +669,6 @@ def run_experiment(
                 f"Aborting result generation after {len(fatal_failures)} post-filter failures."
             )
 
-        # 5-8. Aggregate portfolios, compute metrics, dump CSVs, plot.
         metrics_df = aggregate_and_report(
             results, raw_daily,
             class_symbols=dict(class_symbols),
@@ -708,7 +681,6 @@ def run_experiment(
     finally:
         if logger is not None:
             logger.finish()
-
 
 def _print_table(df: pd.DataFrame) -> None:
     """Print aligned metrics table grouped by asset class."""
@@ -725,7 +697,6 @@ def _print_table(df: pd.DataFrame) -> None:
             for c in float_cols:
                 print(f" {row[c]:10.4f}", end="")
             print()
-
 
 _ZHANG_STYLE: dict[str, dict] = {
     "Long":    {"color": "#1f77b4", "linestyle": "--", "linewidth": 1.2},
@@ -785,11 +756,9 @@ def _plot_cumulative(
         for spine in ("top", "right"):
             ax.spines[spine].set_visible(False)
 
-    # Hide unused slots
     for j in range(len(grps_ordered), len(ax_flat)):
         ax_flat[j].axis("off")
 
-    # Single horizontal legend below all subplots
     handles = [method_handles[m] for m in method_names if m in method_handles]
     labels = [m for m in method_names if m in method_handles]
     fig.legend(handles, labels, loc="lower center", ncol=len(labels),
@@ -800,7 +769,6 @@ def _plot_cumulative(
     fig.savefig(png_path, dpi=120, bbox_inches="tight")
     print(f"Plot saved to {png_path}")
     return fig
-
 
 def _plot_cumulative_raw(
     portfolio_raw: dict[str, dict[str, pd.Series]],

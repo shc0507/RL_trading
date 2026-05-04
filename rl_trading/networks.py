@@ -17,11 +17,10 @@ class LSTMEncoder(nn.Module):
         self.act = nn.LeakyReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len, n_features)
         out, _ = self.lstm1(x)
         out = self.dropout(out)
         out, _ = self.lstm2(out)
-        return self.act(out[:, -1, :])  # last hidden state: (batch, 32)
+        return self.act(out[:, -1, :])
 
 
 class DQNNetwork(nn.Module):
@@ -35,9 +34,9 @@ class DQNNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.encoder(x)
-        v = self.value_head(h)                    # (batch, 1)
-        a = self.advantage_head(h)                # (batch, n_actions)
-        return v + (a - a.mean(dim=1, keepdim=True))  # (batch, n_actions)
+        v = self.value_head(h)
+        a = self.advantage_head(h)
+        return v + (a - a.mean(dim=1, keepdim=True))
 
 
 class PGNetwork(nn.Module):
@@ -50,7 +49,7 @@ class PGNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.encoder(x)
-        return self.head(h)  # raw logits, (batch, n_actions)
+        return self.head(h)
 
 
 class A2CNetwork(nn.Module):
@@ -61,13 +60,12 @@ class A2CNetwork(nn.Module):
         self.encoder = LSTMEncoder(n_features)
         self.actor = nn.Linear(32, 1)
         self.critic = nn.Linear(32, 1)
-        self.log_std = nn.Parameter(torch.tensor(-1.6))  # exp(-1.6) ≈ 0.2
+        # exp(-1.6) ≈ 0.2 initial std for the pre-squash Gaussian.
+        self.log_std = nn.Parameter(torch.tensor(-1.6))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Pre-squash mean; action = tanh(Normal(mean, std).sample()) ∈ (-1, 1).
-        # log_prob correction happens in the agent.
         h = self.encoder(x)
-        mean = self.actor(h)                # (batch, 1), unbounded
-        value = self.critic(h)              # (batch, 1)
+        mean = self.actor(h)
+        value = self.critic(h)
         log_std = self.log_std.clamp(-5, 0)
         return mean.squeeze(-1), value.squeeze(-1), log_std

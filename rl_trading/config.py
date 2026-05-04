@@ -6,9 +6,8 @@ import os
 import warnings
 from datetime import date, timedelta
 
-# ── Feature windows ──────────────────────────────────────────────────
 OBSERVATION_WINDOW: int = 60
-VOLATILITY_SPAN: int = 60  # EWM vol lookback
+VOLATILITY_SPAN: int = 60
 RSI_WINDOW: int = 30
 MACD_WINDOWS: tuple[tuple[int, int], ...] = ((8, 24), (16, 48), (32, 96))
 MACD_PRICE_STD_WINDOW: int = 63
@@ -16,25 +15,17 @@ MACD_NORMALIZATION_WINDOW: int = 252
 RETURN_HORIZONS: tuple[int, ...] = (21, 42, 63, 252)
 ANNUALIZATION_FACTOR: int = 252
 
-# ── Trading defaults ─────────────────────────────────────────────────
-# Env-level vol target used inside the reward (Eq. 4). v6/v7 used 1.0
-# but A2C regressed badly on commodity/fixed-income; v5 used 0.15 and
-# A2C achieved +0.50 All Sharpe. Reverted to 0.15 for v8 to isolate the
-# σ_tgt effect; portfolio-level rescale stays at 1.0 for paper-magnitude
-# Std(R) in the reported tables.
+# Env-level σ_tgt enters Eq. 4 directly. Portfolio-level rescale at
+# reporting time normalizes Std(R) to PORTFOLIO_VOL_TARGET so reported
+# magnitudes match Zhang Exhibit 2 (Std(R) ≈ 1.0). The two are decoupled
+# because the env value affects training stability while the reporting
+# value is a pure presentation choice.
 DEFAULT_VOL_TARGET: float = 0.15
-# Portfolio-level vol target applied at REPORTING time only (Zhang
-# Exhibit 2 appears to target ≈1.0 so Std(R) ≈ 0.97 across methods).
-# Scale-invariant metrics (Sharpe, Sortino, Calmar) are unaffected.
 PORTFOLIO_VOL_TARGET: float = 1.0
-# Paper Exhibit 1: bp = 0.0020 (= 20 basis points; paper defines 1 bp = 0.0001).
-# v6 split this into train=2/test=20 to give PG room; that crashed A2C
-# (policy learned aggressive trading at 2 bp, got shredded by 10× cost
-# at test). Reverted to 20 bp throughout: paper-spec, no train/test gap.
-DEFAULT_COST_RATE_BP: float = 20.0  # basis points, used during training
-TEST_COST_RATE_BP: float = 20.0  # basis points, used at evaluation
+# Paper Exhibit 1: bp = 0.0020 = 20 basis points (1 bp = 0.0001).
+DEFAULT_COST_RATE_BP: float = 20.0
+TEST_COST_RATE_BP: float = 20.0
 
-# ── Train / val / test splits ────────────────────────────────────────
 # Paper test horizon ends 2019-12-31; anything beyond is post-paper extension.
 TRAIN_START = "2005-01-01"
 TRAIN_END = "2015-12-31"
@@ -43,9 +34,8 @@ VAL_END = "2018-12-31"
 TEST_START = "2019-01-01"
 TEST_END = "2019-12-31"
 
-# ── Asset universe (strict subset of original ETF proxies) ───────────
+# Legacy ETF universe (kept as a fallback when RL_DATA_SOURCE=etf).
 UNIVERSE: list[dict[str, str]] = [
-    # Commodities
     {"symbol": "GLD", "asset_class": "commodity"},
     {"symbol": "SLV", "asset_class": "commodity"},
     {"symbol": "USO", "asset_class": "commodity"},
@@ -54,7 +44,6 @@ UNIVERSE: list[dict[str, str]] = [
     {"symbol": "DBC", "asset_class": "commodity"},
     {"symbol": "UGA", "asset_class": "commodity"},
     {"symbol": "GSG", "asset_class": "commodity"},
-    # Equity Indexes
     {"symbol": "SPY", "asset_class": "equity_index"},
     {"symbol": "QQQ", "asset_class": "equity_index"},
     {"symbol": "IWM", "asset_class": "equity_index"},
@@ -66,13 +55,11 @@ UNIVERSE: list[dict[str, str]] = [
     {"symbol": "FXI", "asset_class": "equity_index"},
     {"symbol": "ACWI", "asset_class": "equity_index"},
     {"symbol": "MDY", "asset_class": "equity_index"},
-    # Fixed Income (~5)
     {"symbol": "TLT", "asset_class": "fixed_income"},
     {"symbol": "IEF", "asset_class": "fixed_income"},
     {"symbol": "SHY", "asset_class": "fixed_income"},
     {"symbol": "LQD", "asset_class": "fixed_income"},
     {"symbol": "AGG", "asset_class": "fixed_income"},
-    # Foreign Exchange (~9)
     {"symbol": "FXE", "asset_class": "fx"},
     {"symbol": "FXB", "asset_class": "fx"},
     {"symbol": "FXC", "asset_class": "fx"},
@@ -82,12 +69,10 @@ UNIVERSE: list[dict[str, str]] = [
     {"symbol": "UUP", "asset_class": "fx"},
 ]
 
-# ── CLC / Pinnacle futures universe (Zhang 2019 Appendix A) ──────────
-# 49 distinct continuous futures; paper header says 50 but table lists 49.
-# Bucketing follows Zhang exactly (NK stays under FX even though it's an
-# equity index contract — that's how Appendix A groups it).
+# Zhang 2019 Appendix A: 49 distinct continuous futures (paper header
+# says 50 but the table lists 49). Bucketing follows Zhang — Nikkei
+# (NK) is grouped under FX in the paper.
 CLC_UNIVERSE: list[dict[str, str]] = [
-    # Commodities (25)
     {"symbol": "CC", "asset_class": "commodity"},
     {"symbol": "DA", "asset_class": "commodity"},
     {"symbol": "GI", "asset_class": "commodity"},
@@ -113,7 +98,6 @@ CLC_UNIVERSE: list[dict[str, str]] = [
     {"symbol": "ZU", "asset_class": "commodity"},
     {"symbol": "ZW", "asset_class": "commodity"},
     {"symbol": "ZZ", "asset_class": "commodity"},
-    # Equity Indexes (10)
     {"symbol": "CA", "asset_class": "equity_index"},
     {"symbol": "ER", "asset_class": "equity_index"},
     {"symbol": "ES", "asset_class": "equity_index"},
@@ -124,13 +108,11 @@ CLC_UNIVERSE: list[dict[str, str]] = [
     {"symbol": "XU", "asset_class": "equity_index"},
     {"symbol": "XX", "asset_class": "equity_index"},
     {"symbol": "YM", "asset_class": "equity_index"},
-    # Fixed Income (5)
     {"symbol": "DT", "asset_class": "fixed_income"},
     {"symbol": "FB", "asset_class": "fixed_income"},
     {"symbol": "TY", "asset_class": "fixed_income"},
     {"symbol": "UB", "asset_class": "fixed_income"},
     {"symbol": "US", "asset_class": "fixed_income"},
-    # FX (9)
     {"symbol": "AN", "asset_class": "fx"},
     {"symbol": "BN", "asset_class": "fx"},
     {"symbol": "CN", "asset_class": "fx"},
@@ -142,16 +124,13 @@ CLC_UNIVERSE: list[dict[str, str]] = [
     {"symbol": "SN", "asset_class": "fx"},
 ]
 
-# ── Data-source selector ─────────────────────────────────────────────
-# Set RL_DATA_SOURCE=etf to use the legacy yfinance ETF proxies; default
-# is 'clc' (Pinnacle RAD futures, matches the paper).
+# RL_DATA_SOURCE=etf for the legacy ETF universe; default is CLC.
 DATA_SOURCE: str = os.environ.get("RL_DATA_SOURCE", "clc").lower()
 if DATA_SOURCE not in ("etf", "clc"):
     raise ValueError(
         f"RL_DATA_SOURCE must be 'etf' or 'clc'; got {DATA_SOURCE!r}"
     )
 
-# Pipeline callers should import ACTIVE_UNIVERSE; it tracks DATA_SOURCE.
 ACTIVE_UNIVERSE: list[dict[str, str]] = (
     CLC_UNIVERSE if DATA_SOURCE == "clc" else UNIVERSE
 )
@@ -165,26 +144,16 @@ def walk_forward_splits(
     test_years: int = 5,
     val_frac: float = 0.10,
 ) -> list[dict[str, tuple[str, str]]]:
-    """Generate expanding-window walk-forward folds (Zhang et al. 2019 style).
+    """Expanding-window walk-forward folds per Zhang p.6.
 
-    For each fold, the "train+val window" spans data_start to the calendar
-    year before test_start_year (same fold cadence as before). The last
-    ``val_frac`` portion (by calendar months) of that window becomes the
-    validation block; the earlier 1 - ``val_frac`` portion is training.
-    This keeps val adjacent to (and upstream of) test without a separate
-    multi-year block, matching the paper's "10% of training data as a
-    separate cross-validation set" prescription.
+    With defaults (data_start=2005, min_train_years=6, test_years=5,
+    val_frac=0.10) yields exactly two folds:
+      train 2005-01→2010-12 (last 10% as val), test 2011-01→2015-12
+      train 2005-01→2015-12 (last 10% as val), test 2016-01→2019-12
 
-    Parameters
-    ----------
-    val_years:
-        Deprecated. Retained for backwards compatibility with existing
-        callers; a non-default value is ignored with a warning. Fold
-        cadence is still driven by the old ``val_years`` default so the
-        5-fold layout is unchanged.
-    val_frac:
-        Fraction of the combined train+val window (in months) assigned
-        to validation. Default 0.10 per the paper.
+    ``val_years`` is kept only for callers that pass it explicitly; the
+    actual validation block is the last ``val_frac`` of the train+val
+    window (paper-aligned).
     """
     if val_years != 3:
         warnings.warn(
@@ -198,13 +167,6 @@ def walk_forward_splits(
 
     start_year = int(data_start[:4])
     end_year = int(data_end[:4])
-
-    # Paper p.6: "We retrain our model at every five years, using all data
-    # available up to that point ... testing period is from 2011 to 2019."
-    # With data_start=2005 and min_train_years=6 we get first test year
-    # 2011, and test_years=5 cadence gives exactly two folds:
-    #   train 2005-01→2010-12 (10% val at tail), test 2011-01→2015-12
-    #   train 2005-01→2015-12 (10% val at tail), test 2016-01→2019-12 (clamped)
     first_test_year = start_year + min_train_years
 
     folds: list[dict[str, tuple[str, str]]] = []
@@ -212,13 +174,10 @@ def walk_forward_splits(
 
     while test_start_year <= end_year:
         test_end_year = min(test_start_year + test_years - 1, end_year)
-        # Combined train+val window ends the year before test starts.
         combined_end_year = test_start_year - 1
         combined_start = date.fromisoformat(data_start)
         combined_end = date(combined_end_year, 12, 31)
 
-        # Split by calendar months: last ceil(val_frac * total_months)
-        # months are validation, with at least one month of val.
         total_months = (
             (combined_end.year - combined_start.year) * 12
             + (combined_end.month - combined_start.month)
@@ -227,18 +186,14 @@ def walk_forward_splits(
         val_months = max(1, int(round(val_frac * total_months)))
         train_months = total_months - val_months
 
-        # train_end = last day of the month `train_months` months after start.
         train_end_month_index = combined_start.month - 1 + train_months - 1
         train_end_year = combined_start.year + train_end_month_index // 12
         train_end_month = train_end_month_index % 12 + 1
-        # Last day of that month.
         if train_end_month == 12:
             train_end_day = date(train_end_year, 12, 31)
         else:
             train_end_day = date(train_end_year, train_end_month + 1, 1) - timedelta(days=1)
 
-        # val_start = first day of the following month; ensures >=1-day gap
-        # from train_end (next calendar day, and always a fresh month).
         val_start_month_index = train_end_month_index + 1
         val_start_year = combined_start.year + val_start_month_index // 12
         val_start_month = val_start_month_index % 12 + 1

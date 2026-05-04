@@ -26,10 +26,7 @@ def _get_symbol_split(
     feature_frame: pd.DataFrame, symbol: str, split: str = "test",
     *, start: str | None = None, end: str | None = None,
 ) -> pd.DataFrame:
-    """Filter feature_frame to a single symbol and split (window_ready rows only).
-
-    If *start* and *end* are provided they override *split*.
-    """
+    """Filter feature_frame to one symbol's window_ready rows in the split."""
     if start is not None and end is not None:
         date_start, date_end = start, end
     else:
@@ -47,7 +44,6 @@ def long_only(
     feature_frame: pd.DataFrame, symbol: str, split: str = "test",
     *, start: str | None = None, end: str | None = None,
 ) -> np.ndarray:
-    """Returns array of positions (all 1.0)."""
     df = _get_symbol_split(feature_frame, symbol, split, start=start, end=end)
     return np.ones(len(df))
 
@@ -56,7 +52,7 @@ def sign_r(
     feature_frame: pd.DataFrame, symbol: str, split: str = "test",
     *, start: str | None = None, end: str | None = None,
 ) -> np.ndarray:
-    """Returns array of positions based on sign of 252-day return."""
+    """A_t = sign(r_{t-252,t}) per Moskowitz/Lim."""
     df = _get_symbol_split(feature_frame, symbol, split, start=start, end=end)
     return np.sign(df["ret_252"].to_numpy())
 
@@ -65,7 +61,7 @@ def macd_signal(
     feature_frame: pd.DataFrame, symbol: str, split: str = "test",
     *, start: str | None = None, end: str | None = None,
 ) -> np.ndarray:
-    """Returns array of positions from the combined MACD signal."""
+    """A_t = combined φ-smoothed MACD signal (Zhang Eq. 12)."""
     df = _get_symbol_split(feature_frame, symbol, split, start=start, end=end)
     return df["macd_signal"].to_numpy()
 
@@ -81,13 +77,11 @@ def compute_baseline_rewards(
     vol_target: float = DEFAULT_VOL_TARGET,
     cost_rate_bp: float = DEFAULT_COST_RATE_BP,
 ) -> pd.Series:
-    """Compute daily trade returns for a given position series.
+    """Daily trade returns for a baseline position series.
 
-    Uses the same reward formula as TradingEnv:
-        reward_t = vol_scale * position_t * daily_ret_t - tc_t
-
-    Returns a Series indexed by date (length = len(positions) - 1,
-    since we need the next price to compute daily return).
+    Mirrors TradingEnv.step exactly: same σ-floor, same μ=1/p_ref
+    normalization, same Eq. 4 cost term. Returns one fewer row than
+    the position array (need the next price to compute the return).
     """
     df = _get_symbol_split(feature_frame, symbol, split, start=start, end=end)
     prices = df["close"].to_numpy(dtype=np.float64)
@@ -102,8 +96,6 @@ def compute_baseline_rewards(
     rewards = np.empty(n, dtype=np.float64)
     prev_pos = 0.0
     prev_vol_scale = 0.0
-    # Must mirror env.py: σ at decision-time index t, 1% σ floor, and
-    # per-contract μ = 1/p_ref price normalization.
     ref_price = float(prices[0]) if prices[0] > 0 else 1.0
 
     for t in range(n):

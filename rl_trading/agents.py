@@ -15,8 +15,6 @@ import torch.optim as optim
 from rl_trading.networks import A2CNetwork, DQNNetwork, PGNetwork
 
 
-# ── DQN Agent ──────────────────────────────────────────────────────────
-
 class DQNAgent:
     """Double DQN with dueling architecture and experience replay."""
 
@@ -88,15 +86,13 @@ class DQNAgent:
         ns = torch.tensor(np.array(next_states), dtype=torch.float32, device=self.device)
         d = torch.tensor(dones, dtype=torch.float32, device=self.device)
 
-        # Switch to train mode before the gradient forward. select_action leaves
-        # online in eval, and cuDNN RNN requires train mode for backward.
+        # cuDNN RNN backward requires train mode; select_action leaves eval.
         self.online.train()
 
-        # Double DQN: online selects action, target evaluates
+        # Double DQN: online selects action, target evaluates.
         q_vals = self.online(s).gather(1, a.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            # Bootstrap argmax in eval mode so dropout doesn't randomize
-            # the action the target network is asked to value.
+            # eval mode for argmax so dropout doesn't randomize the choice.
             self.online.eval()
             best_actions = self.online(ns).argmax(dim=1)
             self.online.train()
@@ -132,35 +128,21 @@ class DQNAgent:
         self.online.load_state_dict(torch.load(path, map_location=self.device, weights_only=True))
         self.target.load_state_dict(self.online.state_dict())
 
-
-# ── PG Agent (REINFORCE) ──────────────────────────────────────────────
-
 class PGAgent:
     """REINFORCE with reward-to-go, mean baseline, and entropy bonus.
 
-    Deviates from Zhang Eq. 6 / Exhibit 1 in three ways that are essentially
-    required to get REINFORCE working under 20-bp transaction costs and 50+
-    daily-bar episodes; paper omits these stabilizers, but they are standard
-    practice and prevent the silent-PG attractor where the softmax saturates
-    at "always hold" because trading costs > episode-mean reward signal:
-      - γ = 0.95 (paper Exhibit 1 says 0.3, but γ=0.3 gives effective horizon
-        ~3 bars and leaves G_t too small to overcome the cost baseline).
-      - entropy_coef = 0.05 (no entropy bonus in paper; without it the
-        softmax collapses to one-hot within ~10 epochs).
-      - Mean-of-batch baseline (unbiased; already restored).
+    Deviates from Zhang Eq. 6 in three ways needed for stable training
+    on dollar-unit rewards: γ = 0.95 (paper says 0.3, too short horizon
+    for MC update to overcome cost baseline), entropy bonus 0.01 (paper
+    has none; without it the softmax collapses to one-hot), and a
+    mean-of-batch baseline (unbiased, prevents NaN in multinomial).
     """
 
     def __init__(
         self,
         n_features: int = 10,
-        # v7: lr 1e-4 -> 5e-4. PG gradients are tiny relative to A2C/DQN
-        # because per-bar return signal is small after /p_ref normalization
-        # and one update per episode means few opportunities to move.
         lr: float = 5e-4,
         gamma: float = 0.95,
-        # v7: entropy_coef 0.05 -> 0.01. The value gradient is O(0.05) per
-        # sample (|G_t| ~ 0.05 with γ=0.95); a 0.05 entropy coefficient
-        # was the same magnitude and kept the softmax pinned to uniform.
         entropy_coef: float = 0.01,
         device: str = "cpu",
     ):
@@ -171,7 +153,6 @@ class PGAgent:
         self.net = PGNetwork(n_features).to(self.device)
         self.optimizer = optim.Adam(self.net.parameters(), lr=lr)
 
-        # Episode buffers
         self.states: list = []
         self.actions: list = []
         self.rewards: list = []
@@ -195,24 +176,16 @@ class PGAgent:
         self.rewards.append(reward)
 
     def train_episode(self) -> float:
-        """Update policy after a full episode. Returns loss value."""
         if not self.rewards:
             return 0.0
 
-        # Discounted reward-to-go
         returns = []
         g = 0.0
         for r in reversed(self.rewards):
             g = r + self.gamma * g
             returns.insert(0, g)
         returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
-
-        # Subtract the batch mean as a constant baseline. Paper Eq. 6 shows
-        # vanilla REINFORCE, but with dollar-unit rewards on high-priced
-        # commodity contracts the DC offset in G_t saturates the softmax
-        # and training diverges (inf/nan in multinomial). Subtracting the
-        # mean is unbiased — E[∇log π · b] = 0 for any state-independent b
-        # — so the expected gradient matches Eq. 6; only variance is lower.
+        # State-independent baseline: unbiased, only reduces variance.
         returns = returns - returns.mean()
 
         s = torch.tensor(np.array(self.states), dtype=torch.float32, device=self.device)
@@ -222,7 +195,6 @@ class PGAgent:
         log_probs_full = F.log_softmax(logits, dim=-1)
         entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1).mean()
         log_probs = log_probs_full.gather(1, a.unsqueeze(1)).squeeze(1)
-        # Maximize expected return + entropy_coef * H(π).
         loss = -(log_probs * returns).mean() - self.entropy_coef * entropy
 
         self.optimizer.zero_grad()
@@ -251,11 +223,8 @@ class PGAgent:
     def load(self, path: str | Path):
         self.net.load_state_dict(torch.load(path, map_location=self.device, weights_only=True))
 
-
-# ── A2C Agent (continuous) ────────────────────────────────────────────
-
 class A2CAgent:
-    """Advantage Actor-Critic with continuous actions and TD advantage."""
+    """Advantage Actor-Critic with continuous TanhNormal policy."""
 
     def __init__(
         self,
@@ -265,9 +234,6 @@ class A2CAgent:
         batch_size: int = 128,
         gamma: float = 0.3,
         value_coef: float = 0.5,
-        # v8: revert to 0.0 (paper-literal). v5 (entropy=0) achieved +0.50
-        # All Sharpe; v6/v7 (entropy=0.01) regressed to -0.77. A2C's
-        # TanhNormal already gets exploration from the Gaussian σ.
         entropy_coef: float = 0.0,
         device: str = "cpu",
     ):
@@ -285,7 +251,6 @@ class A2CAgent:
             {"params": self.net.critic.parameters(), "lr": lr_critic},
         ])
 
-        # Step buffer
         self.states: list = []
         self.actions: list = []
         self.rewards: list = []
@@ -294,7 +259,6 @@ class A2CAgent:
         self.last_stats: dict[str, float] = {}
 
     def select_action(self, state: np.ndarray, training: bool = True) -> float:
-        # TanhNormal policy: sample u ~ N(mean, std), action = tanh(u) ∈ (-1, 1).
         self.net.eval()
         try:
             with torch.no_grad():
@@ -333,20 +297,15 @@ class A2CAgent:
             td_target = r + self.gamma * next_value * (1 - d)
         advantage = (td_target - value).detach()
 
-        # Critic loss
         critic_loss = nn.functional.mse_loss(value, td_target)
 
-        # TanhNormal log prob: action a = tanh(u), u ~ N(mean, std).
-        # Recover u = atanh(a) with numerical clamp; Jacobian correction is
-        # -log(1 - a^2).  See Haarnoja et al. (2018) SAC appendix C.
+        # TanhNormal: u = atanh(a) with -log(1-a^2) Jacobian (Haarnoja
+        # et al. 2018, SAC appendix C).
         a_clamped = a.clamp(-0.999999, 0.999999)
         u = torch.atanh(a_clamped)
         dist = torch.distributions.Normal(mean, std)
         log_prob = dist.log_prob(u) - torch.log1p(-a_clamped.pow(2) + 1e-6)
         actor_loss = -(log_prob * advantage).mean()
-
-        # Entropy bonus uses the pre-squash Gaussian entropy (common
-        # TanhNormal approximation; true entropy has no closed form).
         entropy = dist.entropy().mean()
 
         loss = actor_loss + self.value_coef * critic_loss - self.entropy_coef * entropy

@@ -29,18 +29,13 @@ def fetch_bars(
     *,
     cache: bool = True,
 ) -> pd.DataFrame:
-    """Download daily OHLCV bars via yfinance.
-
-    Returns a DataFrame with columns:
-        date, symbol, open, high, low, close, adj_close, volume
-    sorted by (symbol, date).
-    """
+    """Daily OHLCV via yfinance, returned as a (symbol, date)-sorted frame."""
     if cache:
         path = _cache_path(symbols, start, end)
         if path.exists():
             return pd.read_parquet(path)
 
-    # yfinance treats `end` as exclusive; add one day to include it.
+    # yfinance treats `end` as exclusive; bump one day so it's included.
     end_inclusive = (pd.Timestamp(end) + timedelta(days=1)).strftime("%Y-%m-%d")
 
     raw = yf.download(
@@ -58,7 +53,6 @@ def fetch_bars(
             df = raw[sym].copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
         except KeyError:
             continue
-        # Flatten any remaining MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(0)
         df = df.dropna(subset=["Close"])
@@ -66,7 +60,6 @@ def fetch_bars(
             continue
         df = df.reset_index()
         df.columns = [c.lower().replace(" ", "_") for c in df.columns]
-        # Rename 'adj_close' if yfinance returns 'adj close'
         if "adj_close" not in df.columns and "adjclose" in df.columns:
             df = df.rename(columns={"adjclose": "adj_close"})
         if "adj_close" not in df.columns:
@@ -97,15 +90,9 @@ def load_clc_bars(
 ) -> pd.DataFrame:
     """Load Pinnacle CLC daily bars from local CSVs.
 
-    Files live in ``CLCDATA/<SYMBOL>_<ADJ>.CSV`` with no header and columns
-    ``date,open,high,low,close,volume,open_interest`` (date in MM/DD/YYYY).
-
-    ``adjustment`` selects the contract-stitching method: RAD (ratio-adjusted,
-    matches Zhang 2019), REV (back-adjusted), or NON (unadjusted).
-
-    Known anomalies outside the Zhang 2005–2019 replication window (safe to
-    ignore unless you extend the window): ZU_RAD first row 1984-01-03 has
-    OHLC=0; ZI_RAD last row 2026-04-13 has inconsistent OHLC.
+    Files: ``CLCDATA/<SYMBOL>_<ADJ>.CSV``, no header,
+    ``date,open,high,low,close,volume,open_interest`` with date in MM/DD/YYYY.
+    ``adjustment`` is RAD (Zhang's choice), REV, or NON.
     """
     adj = adjustment.upper()
     if adj not in {"RAD", "REV", "NON"}:
@@ -129,8 +116,7 @@ def load_clc_bars(
         if df.empty:
             continue
         df["symbol"] = sym
-        # RAD is already the adjusted series; keep adj_close for schema parity
-        # with the ETF path (features.py still reads `close`, unchanged).
+        # RAD is already adjusted; keep adj_close column for schema parity.
         df["adj_close"] = df["close"]
         frames.append(
             df[["date", "symbol", "open", "high", "low", "close", "adj_close", "volume"]]
@@ -149,7 +135,6 @@ def load_clc_bars(
 
 
 def load_bars(symbols: list[str], start: str, end: str) -> pd.DataFrame:
-    """Dispatch to the data source selected by ``config.DATA_SOURCE``."""
     if DATA_SOURCE == "clc":
         return load_clc_bars(symbols, start, end)
     return fetch_bars(symbols, start=start, end=end)
